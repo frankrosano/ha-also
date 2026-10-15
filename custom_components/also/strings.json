@@ -1,0 +1,117 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect your ALSO account",
+        "description": "Enter the e-mail address of your ALSO account. A one-time code will be sent to it.",
+        "data": {
+          "email": "E-mail"
+        }
+      },
+      "otp": {
+        "title": "Enter the code",
+        "description": "Enter the one-time code that was sent to {email}.",
+        "data": {
+          "code": "Code"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Sign in again",
+        "description": "Your ALSO session has expired. Submit to send a new one-time code to {email}."
+      },
+      "reauth_otp": {
+        "title": "Enter the code",
+        "description": "Enter the one-time code that was sent to {email}.",
+        "data": {
+          "code": "Code"
+        }
+      }
+    },
+    "error": {
+      "invalid_email": "Enter a valid e-mail address.",
+      "invalid_code": "The code is wrong or has expired. Check the latest e-mail and try again.",
+      "rate_limited": "Too many attempts. Wait a few minutes and try again.",
+      "cannot_connect": "Could not reach the ALSO service. Try again later.",
+      "unknown": "An unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "This ALSO account is already configured.",
+      "reauth_successful": "Re-authentication was successful.",
+      "wrong_account": "The code belongs to a different ALSO account than this entry."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "ALSO options",
+        "data": {
+          "scan_interval": "Polling interval (seconds, 60 to 3600)"
+        },
+        "description": "Live updates arrive over a push connection. The poll only refreshes values the connection does not carry, so a slow interval is fine."
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "battery_level": {
+        "name": "Battery level"
+      },
+      "charge_limit": {
+        "name": "Charge limit"
+      },
+      "battery_level_real": {
+        "name": "Battery level (real)"
+      },
+      "odometer": {
+        "name": "Odometer"
+      },
+      "minutes_until_full": {
+        "name": "Time until fully charged"
+      },
+      "battery_health": {
+        "name": "Battery health"
+      },
+      "firmware_version": {
+        "name": "Firmware version"
+      },
+      "charge_state": {
+        "name": "Charge state",
+        "state": {
+          "not_charging": "Not charging",
+          "fully_charged": "Fully charged"
+        }
+      },
+      "charge_state_raw": {
+        "name": "Charge state (shadow, raw)"
+      },
+      "power_state_raw": {
+        "name": "Power state (raw)"
+      },
+      "ride_mode_raw": {
+        "name": "Ride mode (raw)"
+      },
+      "fault_count": {
+        "name": "Active faults"
+      },
+      "gps_satellites": {
+        "name": "GPS satellites"
+      },
+      "last_location_update": {
+        "name": "Last location update"
+      }
+    },
+    "binary_sensor": {
+      "connected": {
+        "name": "Connected"
+      },
+      "push_connected": {
+        "name": "Push connected"
+      }
+    },
+    "device_tracker": {
+      "location": {
+        "name": "Location"
+      }
+    }
+  }
+}

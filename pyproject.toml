@@ -1,0 +1,31 @@
+# Development tooling only. This repository is a HACS custom integration, not a published package.
+[project]
+name = "ha-also-dev"
+version = "0.2.1"
+description = "Development environment for the ALSO Home Assistant custom integration."
+requires-python = ">=3.13.2"
+dependencies = []
+
+[project.optional-dependencies]
+# Install the local library first: uv pip install -e /path/to/pyalso
+dev = [
+    "pytest-homeassistant-custom-component==0.13.316",
+    "ruff==0.17.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["custom_components"]

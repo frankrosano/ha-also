@@ -1,0 +1,14 @@
+{
+  "domain": "also",
+  "name": "ALSO",
+  "codeowners": ["@frankrosano"],
+  "config_flow": true,
+  "documentation": "https://github.com/frankrosano/ha-also",
+  "integration_type": "hub",
+  "iot_class": "cloud_push",
+  "issue_tracker": "https://github.com/frankrosano/ha-also/issues",
+  "requirements": [
+    "pyalso[push] @ https://github.com/frankrosano/pyalso/archive/refs/tags/v0.2.1.zip"
+  ],
+  "version": "0.2.1"
+}
