@@ -13,7 +13,7 @@ jobs:
       - name: Create environment
         run: |
           uv venv --python 3.13
-          uv pip install "pyalso[push] @ https://github.com/frankrosano/pyalso/archive/refs/tags/v0.2.1.zip"
+          uv pip install "pyalso[push]@https://github.com/frankrosano/pyalso/archive/refs/tags/v0.2.1.zip"
           uv pip install "pytest-homeassistant-custom-component==0.13.316" "ruff==0.17.0"
       - run: uv run --no-sync ruff check
       - run: uv run --no-sync ruff format --check

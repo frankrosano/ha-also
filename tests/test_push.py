@@ -709,7 +709,7 @@ def test_manifest_matches_the_push_setup() -> None:
     )
     assert manifest["iot_class"] == "cloud_push"
     assert manifest["requirements"] == [
-        "pyalso[push] @ https://github.com/frankrosano/pyalso/archive/refs/tags/"
+        "pyalso[push]@https://github.com/frankrosano/pyalso/archive/refs/tags/"
         f"v{pyalso.__version__}.zip"
     ]
     assert manifest["version"] == pyalso.__version__ == "0.2.1"
