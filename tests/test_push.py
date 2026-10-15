@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -41,6 +42,7 @@ from custom_components.also.const import (
     VEHICLE_LIST_EVERY_N_UPDATES,
 )
 from custom_components.also.diagnostics import async_get_config_entry_diagnostics
+from custom_components.also.sensor import CHARGE_STATE_OPTIONS
 
 from .common import (
     BASE_TIME,
@@ -133,10 +135,12 @@ async def test_minutes_until_full_stays_unknown_when_absent(
     # Other packets do not carry the value: it stays unknown, nothing is made up.
     stream.emit(bike_info_event())
     stream.emit(odometer_event(123_500))
-    # An un-stamped battery packet without the field is not read as "zero minutes" either.
+    # An un-stamped battery packet without the field is not read as "zero minutes" either. (It also
+    # has no source time, so its level cannot outrank the timestamped REST value: the REST
+    # reading stays.)
     stream.emit(battery_event(60, minutes=None, health=None, at=None))
     await hass.async_block_till_done()
-    assert float(_state(hass, "sensor", "battery_level").state) == 60
+    assert float(_state(hass, "sensor", "battery_level").state) == 87.5
     assert _state(hass, "sensor", "minutes_until_full").state == STATE_UNKNOWN
     assert _state(hass, "sensor", "battery_health").state == STATE_UNKNOWN
     # In a stamped packet proto3 omits zero, and pyalso documents that as 0 minutes (full).
@@ -473,7 +477,7 @@ async def test_charge_state_enum_sensor_follows_the_push_stream(
     state = _state(hass, "sensor", "charge_state")
     assert state.state == "not_charging"
     assert state.attributes["device_class"] == "enum"
-    assert state.attributes["options"] == ["not_charging", "fully_charged"]
+    assert state.attributes["options"] == CHARGE_STATE_OPTIONS
     assert state.attributes["charging_state_raw"] == 1
     assert _state(hass, "sensor", "charge_state_raw").state == "3"  # untouched by the stream
 
@@ -700,6 +704,8 @@ def test_alsostream_provides_the_interface_the_coordinator_uses() -> None:
 
 
 def test_manifest_matches_the_push_setup() -> None:
+    """The two release trains are independent: the integration version is its own, but the library
+    tag the manifest requires must be the pyalso version this suite runs against."""
     import pathlib
 
     import pyalso
@@ -708,11 +714,21 @@ def test_manifest_matches_the_push_setup() -> None:
         (pathlib.Path(__file__).parents[1] / "custom_components/also/manifest.json").read_text()
     )
     assert manifest["iot_class"] == "cloud_push"
+    # No spaces: hassfest rejects "name @ url". The tag is the installed library version.
     assert manifest["requirements"] == [
         "pyalso[push]@https://github.com/frankrosano/pyalso/archive/refs/tags/"
         f"v{pyalso.__version__}.zip"
     ]
-    assert manifest["version"] == pyalso.__version__ == "0.2.1"
+    assert re.fullmatch(r"\d+\.\d+\.\d+", manifest["version"])  # its own version, not pyalso's
+
+
+def test_hacs_json_declares_a_minimum_home_assistant_version() -> None:
+    import pathlib
+
+    hacs = json.loads((pathlib.Path(__file__).parents[1] / "hacs.json").read_text())
+    # 2025.12.0 is the first core release with UpdateFailed(retry_after=...) (checked against the
+    # 2025.11.0 and 2025.12.0 sources); every other API used exists there as well.
+    assert hacs["homeassistant"] == "2025.12.0"
 
 
 # ----------------------------------------------------------- availability from either source

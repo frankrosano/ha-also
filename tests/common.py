@@ -123,18 +123,23 @@ def make_user() -> User:
     return User.from_dict(USER_DICT)
 
 
-def make_entry(**overrides: Any) -> MockConfigEntry:
-    data = {
-        CONF_EMAIL: EMAIL,
-        CONF_ACCESS_TOKEN: ACCESS_TOKEN,
-        CONF_REFRESH_TOKEN: REFRESH_TOKEN,
-        CONF_ID_TOKEN: ID_TOKEN,
-        CONF_EXPIRES_AT: EXPIRES_AT,
-    }
+def make_entry(
+    *, data: dict[str, Any] | None = None, unique_id: str = USER_UUID, **overrides: Any
+) -> MockConfigEntry:
+    """A config entry like the ones written by 0.2.1 (no stored identity keys); ``data`` replaces
+    the stored data entirely."""
+    if data is None:
+        data = {
+            CONF_EMAIL: EMAIL,
+            CONF_ACCESS_TOKEN: ACCESS_TOKEN,
+            CONF_REFRESH_TOKEN: REFRESH_TOKEN,
+            CONF_ID_TOKEN: ID_TOKEN,
+            CONF_EXPIRES_AT: EXPIRES_AT,
+        }
     return MockConfigEntry(
         domain=DOMAIN,
         title=EMAIL,
-        unique_id=USER_UUID,
+        unique_id=unique_id,
         data=data,
         **overrides,
     )
@@ -188,7 +193,7 @@ def location_event(
         longitude_nano=lon_nano,
         altitude_raw=5000,
         azimuth_raw=90,
-        velocity_mph=3.5,
+        velocity_raw=3.5,
         gps_accuracy_raw=4,
         satellite_count=11,
         gps_time=at,

@@ -5,9 +5,14 @@ fields) without leaking private data. Payload bytes are therefore re-encoded wit
 could identify the owner or the bike masked:
 
 * text (printable ASCII) is replaced by ``x`` of the same length (serial numbers, names);
-* varints of 100 000 000 or more, and every fixed64 value, are zeroed (coordinates are sint64
-  nanodegrees on the wire, timestamps and ids are large too);
-* other length-delimited fields that parse as messages are redacted recursively; the rest is zeroed.
+* varints of 100 000 000 or more, and every fixed32 and fixed64 value, are zeroed (coordinates are
+  sint64 nanodegrees on the wire, but a 32-bit float can carry one too, so fixed32 is masked as
+  well; timestamps and ids are large);
+* other length-delimited fields that parse as messages, and the bodies of group fields, are
+  redacted recursively; the rest is zeroed.
+
+The field NUMBERS, wire types and small values are kept on purpose: that is what makes the summary
+useful for learning the protocol. Floats are therefore not recoverable from a summary.
 
 A payload that cannot be parsed keeps only feature, command, status and length. The summaries are
 only ever shown in diagnostics; the log gets feature, command, status and length.
@@ -19,14 +24,14 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
-from pyalso import StreamEvent, UnknownPacket
-
-# pyalso keeps its wire reader private; the version is pinned (pyalso[push]==0.2.1).
-from pyalso._wire import (
+from pyalso import (
     WIRE_FIXED32,
     WIRE_FIXED64,
     WIRE_LEN,
+    WIRE_START_GROUP,
     WIRE_VARINT,
+    StreamEvent,
+    UnknownPacket,
     WireError,
     WireField,
     parse_fields,
@@ -47,14 +52,12 @@ def _redact_field(item: WireField, depth: int) -> WireField:
         return (
             item if isinstance(value, int) and value < MAX_VARINT_KEPT else replace(item, value=0)
         )
-    if item.wire_type == WIRE_FIXED64:
-        return replace(item, value=0)
-    if item.wire_type == WIRE_FIXED32:
-        return item
-    if item.wire_type == WIRE_LEN and isinstance(value, bytes):
+    if item.wire_type in (WIRE_FIXED64, WIRE_FIXED32):
+        return replace(item, value=0)  # 64-bit and 32-bit (float) values may be coordinates
+    if item.wire_type in (WIRE_LEN, WIRE_START_GROUP) and isinstance(value, bytes):
         if not value:
             return item
-        if _printable(value):
+        if item.wire_type == WIRE_LEN and _printable(value):
             return replace(item, value=b"x" * len(value))
         if depth < _MAX_DEPTH:
             try:

@@ -21,7 +21,12 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.typing import StateType
 from pyalso import BatteryChargingState, VehicleState
 
-from .const import EXPLICIT_SHADOW_KEYS, SHADOW_UNIQUE_ID_INFIX
+from .const import (
+    EXPLICIT_PUSH_KEYS,
+    EXPLICIT_SHADOW_KEYS,
+    PUSH_UNIQUE_ID_INFIX,
+    SHADOW_UNIQUE_ID_INFIX,
+)
 from .coordinator import AlsoConfigEntry, AlsoCoordinator
 from .entity import AlsoEntity
 from .privacy import is_position_key
@@ -37,9 +42,16 @@ class AlsoSensorEntityDescription(SensorEntityDescription):
     attrs_fn: Callable[[VehicleState], dict[str, Any]] | None = None
 
 
-#: Charge-state options known up front. Anything else the stream reports is exposed as
-#: ``unknown_<n>`` (see :func:`charge_state_option`) and added to the options when it shows up.
-CHARGE_STATE_OPTIONS = ["not_charging", "fully_charged"]
+#: Charge-state options known up front: the two values verified by observation, plus the schema's
+#: other numbers (0 unspecified, 2 CHARGING, 4 CHARGING_ISSUE) under NEUTRAL names, because their
+#: meaning has never been observed (see :func:`charge_state_option`).
+#:
+#: A number outside this list (a value a future firmware sends) is exposed as ``unknown_<n>`` and
+#: appended to the entity's options while it is the current state: the entity's option list
+#: therefore grows by that value and shrinks again when the state moves on, and the value has no
+#: translation (the UI shows the raw ``unknown_<n>``). Recorded history may mention such a state
+#: that the current option list no longer lists.
+CHARGE_STATE_OPTIONS = ["not_charging", "fully_charged", "unknown_0", "unknown_2", "unknown_4"]
 
 
 def charge_state_option(state: VehicleState) -> str | None:
@@ -71,6 +83,7 @@ SENSORS: tuple[AlsoSensorEntityDescription, ...] = (
         key="charge_limit",
         translation_key="charge_limit",
         native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda s: s.charge_limit,
     ),
     AlsoSensorEntityDescription(
@@ -133,6 +146,11 @@ SENSORS: tuple[AlsoSensorEntityDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda s: s.charge_state_raw,
     ),
+    # NOTE: the shadow's ``con_NBikePowerState`` and ``hu_NRideModeREQ`` (read here) are NOT the
+    # stream's ``power_state_raw`` / ``ride_mode_raw`` (which pyalso keeps in ``state.push`` and
+    # which come from different enums with their own, unobserved numbering). The same goes for the
+    # two charge states above. These entities read the SHADOW values only; the stream's are
+    # offered by the disabled-by-default ``push_*`` diagnostic sensors, named "(stream)".
     AlsoSensorEntityDescription(
         key="power_state_raw",
         translation_key="power_state_raw",
@@ -192,6 +210,24 @@ def _is_scalar_number(value: Any) -> bool:
     return isinstance(value, int | float) and math.isfinite(value)
 
 
+def discoverable_push_keys(state: VehicleState) -> set[str]:
+    """Stream-only (``state.push``) keys that should get an auto-discovered sensor.
+
+    The same rules as :func:`discoverable_shadow_keys`: numeric and boolean scalars only (serial
+    numbers, firmware and model strings are skipped), nothing that already has an entity, and
+    nothing that looks like position data. Units of these values are mostly unverified, so they
+    are exposed raw, disabled by default, in their own unique-id namespace.
+    """
+    keys: set[str] = set()
+    for key, value in state.push.items():
+        if key in EXPLICIT_PUSH_KEYS or not _is_scalar_number(value):
+            continue
+        if is_position_key(key):
+            continue
+        keys.add(key)
+    return keys
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: AlsoConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback
 ) -> None:
@@ -200,6 +236,7 @@ async def async_setup_entry(
     registry = er.async_get(hass)
     known_vehicles: set[str] = set()
     created_shadow: set[tuple[str, str]] = set()
+    created_push: set[tuple[str, str]] = set()
 
     @callback
     def _add_new() -> None:
@@ -221,10 +258,21 @@ async def async_setup_entry(
                         if (vid, key) not in created_shadow:
                             created_shadow.add((vid, key))
                             entities.append(AlsoShadowSensor(coordinator, vid, key))
+                push_prefix = f"{vid}_{PUSH_UNIQUE_ID_INFIX}"
+                for reg in er.async_entries_for_config_entry(registry, entry.entry_id):
+                    if reg.domain == "sensor" and reg.unique_id.startswith(push_prefix):
+                        key = reg.unique_id.removeprefix(push_prefix)
+                        if (vid, key) not in created_push:
+                            created_push.add((vid, key))
+                            entities.append(AlsoPushSensor(coordinator, vid, key))
             for key in sorted(discoverable_shadow_keys(state)):
                 if (vid, key) not in created_shadow:
                     created_shadow.add((vid, key))
                     entities.append(AlsoShadowSensor(coordinator, vid, key))
+            for key in sorted(discoverable_push_keys(state)):
+                if (vid, key) not in created_push:
+                    created_push.add((vid, key))
+                    entities.append(AlsoPushSensor(coordinator, vid, key))
         if entities:
             async_add_entities(entities)
 
@@ -285,6 +333,30 @@ class AlsoShadowSensor(AlsoEntity, SensorEntity):
     def native_value(self) -> StateType:
         state = self.vehicle_state
         value = state.shadow_value(self._shadow_key) if state else None
+        if not _is_scalar_number(value):
+            return None
+        return int(value) if isinstance(value, bool) else value
+
+
+class AlsoPushSensor(AlsoEntity, SensorEntity):
+    """Auto-discovered raw value that only the live stream delivers (``state.push``).
+
+    Disabled by default, no unit, no device class: most of these units are unverified. The name
+    says "(stream)" so it is never mistaken for the shadow value of a similarly named key.
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
+
+    def __init__(self, coordinator: AlsoCoordinator, vehicle_id: str, push_key: str) -> None:
+        super().__init__(coordinator, vehicle_id, f"{PUSH_UNIQUE_ID_INFIX}{push_key}")
+        self._push_key = push_key
+        self._attr_name = f"{push_key} (stream)"
+
+    @property
+    def native_value(self) -> StateType:
+        state = self.vehicle_state
+        value = state.push.get(self._push_key) if state else None
         if not _is_scalar_number(value):
             return None
         return int(value) if isinstance(value, bool) else value

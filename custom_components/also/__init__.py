@@ -8,11 +8,13 @@ from collections.abc import Awaitable, Callable
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from pyalso import AlsoAuth, AlsoClient, AlsoStream, Tokens
 
-from .const import PLATFORMS
+from .const import DOMAIN, PLATFORMS
 from .coordinator import AlsoConfigEntry, AlsoCoordinator, PushStream
 
 _LOGGER = logging.getLogger(__name__)
@@ -21,6 +23,9 @@ _LOGGER = logging.getLogger(__name__)
 _OLD_ODOMETER_SUFFIX = "_odometer_raw"
 _NEW_ODOMETER_SUFFIX = "_odometer"
 
+#: Repair issue shown while the latest rotated tokens could not be written to the config entry.
+ISSUE_TOKEN_STORE = "token_store_failed"
+
 
 def _token_persister(
     hass: HomeAssistant, entry: AlsoConfigEntry
@@ -28,12 +33,54 @@ def _token_persister(
     """Build the callback pyalso awaits after EVERY login/refresh.
 
     The refresh token rotates, so the new set must reach the config entry before it is used.
+
+    What this does and does not guarantee (do not read more into it): the awaited call updates the
+    config entry IN MEMORY before pyalso uses or returns the new access token, and asks Home
+    Assistant to save it. Home Assistant writes config entries with a short delay (about one
+    second) and once more when it stops, so the tokens are on disk shortly after, not at the
+    moment this coroutine returns: a crash or power loss inside that window leaves the previous,
+    already consumed refresh token on disk and the next start asks for a new sign-in. A failing
+    update is not raised (pyalso keeps the new tokens in memory either way and the running
+    integration keeps working): it is logged distinctly and a repair issue is shown until a later
+    update succeeds. A later failure of the disk write itself is logged by Home Assistant's storage
+    layer and cannot be reported back through this callback.
     """
 
     async def _persist(tokens: Tokens) -> None:
-        hass.config_entries.async_update_entry(entry, data={**entry.data, **tokens.to_dict()})
+        try:
+            hass.config_entries.async_update_entry(entry, data={**entry.data, **tokens.to_dict()})
+        except Exception as err:  # noqa: BLE001 - never let a storage problem break the session
+            _LOGGER.error(
+                "Could not store the rotated ALSO sign-in tokens (%s). They are kept in memory; "
+                "if Home Assistant restarts before a later update succeeds you must sign in again",
+                type(err).__name__,
+            )
+            ir.async_create_issue(
+                hass,
+                DOMAIN,
+                ISSUE_TOKEN_STORE,
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key=ISSUE_TOKEN_STORE,
+            )
+            return
+        ir.async_delete_issue(hass, DOMAIN, ISSUE_TOKEN_STORE)
 
     return _persist
+
+
+def _preload_grpc() -> None:
+    """Import grpcio (a C extension) in an executor thread instead of on the event loop.
+
+    ``AlsoStream.start`` imports it lazily with a plain ``import`` statement, which Home
+    Assistant's blocking-import detector does not see. A missing package is not an error here:
+    the stream reports it and the integration falls back to polling.
+    """
+    try:
+        import grpc  # noqa: F401
+        import grpc.aio  # noqa: F401
+    except ImportError:
+        pass
 
 
 @callback
@@ -51,6 +98,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: AlsoConfigEntry) -> bool
         tokens = Tokens.from_dict(entry.data)
     except (ValueError, TypeError) as err:
         raise ConfigEntryAuthFailed("Stored credentials are incomplete") from err
+    ir.async_delete_issue(hass, DOMAIN, ISSUE_TOKEN_STORE)  # re-evaluated by this run
     session = async_get_clientsession(hass)
     auth = AlsoAuth(session, tokens=tokens, token_update_callback=_token_persister(hass, entry))
 
@@ -70,8 +118,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: AlsoConfigEntry) -> bool
         await coordinator.async_stop_push()
 
     entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _stop_push))
+    await hass.async_add_import_executor_job(_preload_grpc)  # before the first stream imports it
     await coordinator.async_start_push()
     return True
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, entry: AlsoConfigEntry, device_entry: dr.DeviceEntry
+) -> bool:
+    """Allow deleting the device of a bike that is no longer on the account.
+
+    A bike that is still listed keeps its device: removing it would only bring it back at the
+    next refresh.
+    """
+    coordinator = getattr(entry, "runtime_data", None)
+    if coordinator is None:
+        return False
+    current = set(coordinator.vehicles) | set(coordinator.data or {})
+    return not any(
+        domain == DOMAIN and identifier in current
+        for domain, identifier in device_entry.identifiers
+    )
 
 
 async def _async_entry_updated(hass: HomeAssistant, entry: AlsoConfigEntry) -> None:

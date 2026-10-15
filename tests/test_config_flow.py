@@ -18,6 +18,7 @@ from pyalso import (
     Tokens,
     User,
 )
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.also.const import (
     CONF_ACCESS_TOKEN,
@@ -29,8 +30,11 @@ from custom_components.also.const import (
     DOMAIN,
 )
 
-from .common import EMAIL, USER_UUID, make_entry, make_user
+from .common import EMAIL, USER_REFERENCE_ID, USER_UUID, make_entry, make_user
 
+# The stored format of the two immutable account identifiers (config entry data keys).
+CONF_USER_UUID = "user_uuid"
+CONF_USER_REFERENCE_ID = "user_reference_id"
 NEW_TOKENS = Tokens("new-access", "new-refresh", "new-id", 4_100_000_000.0)
 CHALLENGE = OtpChallenge(EMAIL, "fake-session-1", False, "EMAIL_OTP")
 
@@ -79,6 +83,9 @@ async def test_user_flow_success(hass: HomeAssistant, flow_mocks: FlowMocks) -> 
     assert result["result"].unique_id == USER_UUID
     assert result["data"] == {
         CONF_EMAIL: EMAIL,
+        # Both immutable identifiers are stored so a later reauth can match either one.
+        CONF_USER_UUID: USER_UUID,
+        CONF_USER_REFERENCE_ID: USER_REFERENCE_ID,
         CONF_ACCESS_TOKEN: "new-access",
         CONF_REFRESH_TOKEN: "new-refresh",
         CONF_ID_TOKEN: "new-id",
@@ -248,3 +255,98 @@ async def test_options_flow_rejects_out_of_range(hass: HomeAssistant, value: int
         await hass.config_entries.options.async_configure(
             result["flow_id"], {CONF_SCAN_INTERVAL: value}
         )
+
+
+# ---------------------------------------------------------------- identity matching (review #10)
+async def _reauth(hass: HomeAssistant, entry: MockConfigEntry) -> dict:  # type: ignore[type-arg]
+    result = await entry.start_reauth_flow(hass)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    return await hass.config_entries.flow.async_configure(result["flow_id"], {"code": "123456"})
+
+
+async def test_reauth_accepts_the_same_account_when_the_id_that_keyed_the_entry_is_now_absent(
+    hass: HomeAssistant, flow_mocks: FlowMocks
+) -> None:
+    """Regression: an entry keyed by the uuid was rejected (``wrong_account``) once a response
+    only carried the reference id, because the 'preferred' id was recomputed and compared."""
+    entry = make_entry(
+        data={
+            CONF_EMAIL: EMAIL,
+            CONF_USER_UUID: USER_UUID,
+            CONF_USER_REFERENCE_ID: USER_REFERENCE_ID,
+            CONF_ACCESS_TOKEN: "old",
+            CONF_REFRESH_TOKEN: "old",
+            CONF_ID_TOKEN: "old",
+            CONF_EXPIRES_AT: 1.0,
+        }
+    )
+    entry.add_to_hass(hass)
+    assert entry.unique_id == USER_UUID
+    flow_mocks.client.get_user.return_value = User.from_dict(
+        {"user": {"user_reference_id": USER_REFERENCE_ID}}  # no uuid this time
+    )
+    result = await _reauth(hass, entry)
+    assert result["reason"] == "reauth_successful"
+    assert entry.data[CONF_ACCESS_TOKEN] == "new-access"
+    assert entry.data[CONF_USER_UUID] == USER_UUID  # not lost: updates are merged
+
+
+async def test_reauth_accepts_the_same_account_when_the_entry_was_keyed_by_the_reference_id(
+    hass: HomeAssistant, flow_mocks: FlowMocks
+) -> None:
+    """The reverse drift: the entry was created before a uuid was exposed."""
+    entry = make_entry(
+        unique_id=USER_REFERENCE_ID,
+        data={
+            CONF_EMAIL: EMAIL,
+            CONF_USER_REFERENCE_ID: USER_REFERENCE_ID,
+            CONF_ACCESS_TOKEN: "old",
+            CONF_REFRESH_TOKEN: "old",
+            CONF_ID_TOKEN: "old",
+            CONF_EXPIRES_AT: 1.0,
+        },
+    )
+    entry.add_to_hass(hass)
+    flow_mocks.client.get_user.return_value = make_user()  # now carries BOTH ids
+    result = await _reauth(hass, entry)
+    assert result["reason"] == "reauth_successful"
+    assert entry.data[CONF_USER_UUID] == USER_UUID  # the newly exposed id is remembered
+    assert entry.unique_id == USER_REFERENCE_ID  # the unique id itself never changes
+
+
+async def test_reauth_of_a_legacy_entry_without_stored_ids_matches_its_unique_id(
+    hass: HomeAssistant, flow_mocks: FlowMocks
+) -> None:
+    entry = make_entry()  # unique_id is the uuid; no identity keys in the data (0.2.1 entries)
+    entry.add_to_hass(hass)
+    assert CONF_USER_UUID not in entry.data
+    result = await _reauth(hass, entry)
+    assert result["reason"] == "reauth_successful"
+
+
+async def test_reauth_with_no_overlapping_identifier_is_still_a_different_account(
+    hass: HomeAssistant, flow_mocks: FlowMocks
+) -> None:
+    entry = make_entry(
+        data={
+            CONF_EMAIL: EMAIL,
+            CONF_USER_UUID: USER_UUID,
+            CONF_USER_REFERENCE_ID: USER_REFERENCE_ID,
+            CONF_ACCESS_TOKEN: "old",
+            CONF_REFRESH_TOKEN: "old",
+            CONF_ID_TOKEN: "old",
+            CONF_EXPIRES_AT: 1.0,
+        }
+    )
+    entry.add_to_hass(hass)
+    flow_mocks.client.get_user.return_value = User.from_dict(
+        {
+            "user": {
+                "user_uuid": "11111111-1111-4111-8111-111111111111",
+                "user_reference_id": "USR-AAAA-BBBB-DDDD",
+            }
+        }
+    )
+    result = await _reauth(hass, entry)
+    assert result["reason"] == "wrong_account"
+    assert entry.data[CONF_ACCESS_TOKEN] == "old"

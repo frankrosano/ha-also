@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.core import HomeAssistant
-from pyalso import ConnectionStatus, StreamEvent, VehicleState
+from pyalso import AlsoApiError, AlsoClient, ConnectionStatus, StreamEvent, VehicleState
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.also.coordinator import AlsoCoordinator
@@ -104,38 +104,39 @@ class PyalsoMocks:
 def mock_pyalso() -> Generator[PyalsoMocks]:
     """Patch AlsoAuth/AlsoClient/AlsoStream as imported by ``custom_components.also``.
 
-    The fake client keeps a per-bike state cache and merges pushed updates with the REAL pyalso
-    ``VehicleState`` logic (newest source time wins), exactly as ``AlsoClient`` does.
+    The fake client is a REAL ``pyalso.AlsoClient`` whose three HTTP reads (status shadow,
+    location, connectivity) are replaced by ``mocks.rest_state``. ``get_vehicle_state`` (timestamp
+    stamping, merging of earlier pushes) and ``apply_push_update`` are therefore pyalso's own code,
+    not a copy of it; tests that need to drive that code through real HTTP and a real
+    ``AlsoAuth`` live in ``test_contract.py``.
     """
-    states: dict[str, VehicleState] = {}
     streams = FakeStreams()
     client = MagicMock()
     client.list_all_vehicles = AsyncMock(return_value=[make_vehicle()])
     mocks = PyalsoMocks(MagicMock(), MagicMock(), client, streams)
+    real = AlsoClient(MagicMock(), MagicMock())  # session/auth are never used: reads are replaced
 
-    def _get_vehicle_state(vid: str, vehicle: object = None) -> VehicleState:
-        state = mocks.rest_state(vid)
-        stamped = state.with_shadow_times(float(state.shadow.get("con_tUtc", 0)) or None)
-        previous = states.get(vid)
-        if previous is not None:
-            stamped = stamped.carry_newer_from(previous)
-        states[vid] = stamped
-        return stamped
+    async def _shadow(vid: str) -> dict[str, Any]:
+        return dict(mocks.rest_state(vid).shadow)
 
-    def _apply_push_update(
-        vid: str,
-        partial: dict[str, Any],
-        *,
-        push: dict[str, Any] | None = None,
-        updated_at: float | None = None,
-    ) -> VehicleState:
-        base = states.get(vid) or VehicleState(vehicle_id=vid)
-        state = base.merge_update(partial, push, updated_at=updated_at)
-        states[vid] = state
-        return state
+    async def _location(vid: str) -> Any:
+        location = mocks.rest_state(vid).location
+        if location is None:
+            raise AlsoApiError(503, None, "no location")
+        return location
 
-    client.get_vehicle_state = AsyncMock(side_effect=_get_vehicle_state)
-    client.apply_push_update = MagicMock(side_effect=_apply_push_update)
+    async def _connectivity(vid: str) -> Any:
+        connectivity = mocks.rest_state(vid).connectivity
+        if connectivity is None:
+            raise AlsoApiError(503, None, "no connectivity")
+        return connectivity
+
+    real.get_status_shadow = _shadow  # type: ignore[method-assign]
+    real.get_location = _location  # type: ignore[method-assign]
+    real.get_connectivity = _connectivity  # type: ignore[method-assign]
+    client.get_vehicle_state = AsyncMock(side_effect=real.get_vehicle_state)
+    client.apply_push_update = MagicMock(side_effect=real.apply_push_update)
+    client.real = real
     with (
         patch("custom_components.also.AlsoAuth", mocks.auth_cls),
         patch("custom_components.also.AlsoClient", return_value=client) as client_cls,

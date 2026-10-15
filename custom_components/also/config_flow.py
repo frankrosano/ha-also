@@ -30,6 +30,8 @@ from pyalso import (
 from .const import (
     CONF_EMAIL,
     CONF_SCAN_INTERVAL,
+    CONF_USER_REFERENCE_ID,
+    CONF_USER_UUID,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     MAX_SCAN_INTERVAL,
@@ -101,6 +103,22 @@ class AlsoConfigFlow(ConfigFlow, domain=DOMAIN):
     def _user_unique_id(user: User) -> str | None:
         return user.user_uuid or user.user_reference_id
 
+    @staticmethod
+    def _user_identity_data(user: User) -> dict[str, str]:
+        """The immutable account identifiers present on ``user``, as config entry data."""
+        data: dict[str, str] = {}
+        if user.user_uuid:
+            data[CONF_USER_UUID] = user.user_uuid
+        if user.user_reference_id:
+            data[CONF_USER_REFERENCE_ID] = user.user_reference_id
+        return data
+
+    @staticmethod
+    def _entry_identifiers(unique_id: str | None, data: Mapping[str, Any]) -> set[str]:
+        """Every identifier an existing entry is known by (its unique id plus the stored ids)."""
+        found = {unique_id, data.get(CONF_USER_UUID), data.get(CONF_USER_REFERENCE_ID)}
+        return {value for value in found if isinstance(value, str) and value}
+
     # --------------------------------------------------------------------- user flow
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Ask for the account e-mail and send a code."""
@@ -133,7 +151,11 @@ class AlsoConfigFlow(ConfigFlow, domain=DOMAIN):
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(
                     title=self._email,
-                    data={CONF_EMAIL: self._email, **tokens.to_dict()},
+                    data={
+                        CONF_EMAIL: self._email,
+                        **self._user_identity_data(user),
+                        **tokens.to_dict(),
+                    },
                 )
         return self.async_show_form(
             step_id="otp",
@@ -174,10 +196,18 @@ class AlsoConfigFlow(ConfigFlow, domain=DOMAIN):
             error, tokens, user = await self._async_verify_code(user_input["code"])
             if error or tokens is None or user is None:
                 errors["base"] = error or "unknown"
-            elif self._user_unique_id(user) != entry.unique_id:
+            elif not (
+                self._entry_identifiers(entry.unique_id, entry.data)
+                & self._entry_identifiers(None, self._user_identity_data(user))
+            ):
+                # No overlap in ANY immutable identifier: really a different account. Comparing
+                # only the "preferred" identifier would reject the same account whenever the API
+                # exposes a different set of ids than it did at setup.
                 return self.async_abort(reason="wrong_account")
             else:
-                return self.async_update_reload_and_abort(entry, data_updates=tokens.to_dict())
+                return self.async_update_reload_and_abort(
+                    entry, data_updates={**self._user_identity_data(user), **tokens.to_dict()}
+                )
         return self.async_show_form(
             step_id="reauth_otp",
             data_schema=STEP_OTP_SCHEMA,

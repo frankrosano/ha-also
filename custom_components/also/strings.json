@@ -78,7 +78,10 @@
         "name": "Charge state",
         "state": {
           "not_charging": "Not charging",
-          "fully_charged": "Fully charged"
+          "fully_charged": "Fully charged",
+          "unknown_0": "Unknown (0)",
+          "unknown_2": "Unknown (2)",
+          "unknown_4": "Unknown (4)"
         }
       },
       "charge_state_raw": {
@@ -112,6 +115,12 @@
       "location": {
         "name": "Location"
       }
+    }
+  },
+  "issues": {
+    "token_store_failed": {
+      "title": "ALSO sign-in could not be saved",
+      "description": "Home Assistant refreshed the ALSO sign-in but could not store the new tokens. The integration keeps working until Home Assistant restarts; if that happens before a later save succeeds, you will have to sign in to ALSO again. The issue clears itself when the next save works. Check the Home Assistant log and the free disk space."
     }
   }
 }

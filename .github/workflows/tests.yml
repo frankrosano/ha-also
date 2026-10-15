@@ -13,7 +13,11 @@ jobs:
       - name: Create environment
         run: |
           uv venv --python 3.13
-          uv pip install "pyalso[push]@https://github.com/frankrosano/pyalso/archive/refs/tags/v0.2.1.zip"
+          # The tests run against the pyalso MAIN branch, not the tagged release the manifest
+          # points at: the release tag is created after review, and pinning CI to a tag that does
+          # not exist yet would turn the first run red. A test checks that the manifest tag matches
+          # the pyalso version installed here, so a mismatch still shows up locally.
+          uv pip install "pyalso[push]@https://github.com/frankrosano/pyalso/archive/refs/heads/main.zip"
           uv pip install "pytest-homeassistant-custom-component==0.13.316" "ruff==0.17.0"
       - run: uv run --no-sync ruff check
       - run: uv run --no-sync ruff format --check

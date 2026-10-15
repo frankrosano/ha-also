@@ -14,7 +14,13 @@ from homeassistant.core import HomeAssistant
 from pyalso.fields import SENSITIVE_PUSH_KEYS
 
 from .coordinator import AlsoConfigEntry
-from .privacy import has_position_substring, has_position_word, is_secret_key
+from .privacy import (
+    has_position_substring,
+    has_position_word,
+    is_coordinate_like_number,
+    is_private_text,
+    is_secret_key,
+)
 
 TO_REDACT = {
     "email",
@@ -71,13 +77,31 @@ def _redact_positions(data: Any) -> Any:
     return data
 
 
+def _redact_values(data: Any) -> Any:
+    """Third pass, by VALUE: the key says nothing about an unknown server field.
+
+    Strings that contain an e-mail address, a vehicle/user id, a UUID, a token or a serial-like
+    string, and numbers that could be coordinates, are redacted under ANY key. Unknown shadow keys
+    are kept on purpose (surfacing new data is the point), but not what they might leak.
+    """
+    if isinstance(data, Mapping):
+        return {key: _redact_values(value) for key, value in data.items()}
+    if isinstance(data, list):
+        return [_redact_values(item) for item in data]
+    if isinstance(data, str):
+        return REDACTED if is_private_text(data) else data
+    if is_coordinate_like_number(data):
+        return REDACTED
+    return data
+
+
 async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, entry: AlsoConfigEntry
 ) -> dict[str, Any]:
     """Return redacted diagnostics for a config entry."""
     coordinator = entry.runtime_data
     vehicles = [
-        async_redact_data(_redact_positions(state.raw), TO_REDACT)
+        _redact_values(async_redact_data(_redact_positions(state.raw), TO_REDACT))
         for state in coordinator.data.values()
     ]
     push = []
@@ -94,6 +118,9 @@ async def async_get_config_entry_diagnostics(
                 "last_event": status.last_event.isoformat() if status.last_event else None,
                 "failed_attempts": status.failures,
                 "polling_only": status.unavailable,
+                # Whether a stream object exists for this bike right now (a stream that gave up
+                # is released, so this is False and polling_only is True).
+                "stream_active": coordinator.stream_active(vehicle_id),
             }
         )
     return {

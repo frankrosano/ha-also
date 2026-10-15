@@ -1,7 +1,7 @@
 # Development tooling only. This repository is a HACS custom integration, not a published package.
 [project]
 name = "ha-also-dev"
-version = "0.2.1"
+version = "0.2.2"
 description = "Development environment for the ALSO Home Assistant custom integration."
 requires-python = ">=3.13.2"
 dependencies = []

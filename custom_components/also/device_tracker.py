@@ -32,6 +32,11 @@ class AlsoTracker(AlsoEntity, TrackerEntity):
     def __init__(self, coordinator: AlsoCoordinator, vehicle_id: str) -> None:
         super().__init__(coordinator, vehicle_id, "location")
 
+    # ``gps_accuracy`` is deliberately NOT overridden (Home Assistant's default of 0 m applies).
+    # pyalso exposes the cloud's accuracy value (``location.accuracy_raw`` and the stream's
+    # ``gps_accuracy_raw``) but its unit is only "metres" according to the public schema and has
+    # never been verified against a known fix. Feeding an unverified number into zone enter/leave
+    # logic could be worse than the default, so it is not used until the unit is confirmed.
     @property
     def latitude(self) -> float | None:
         state = self.vehicle_state
@@ -51,5 +56,6 @@ class AlsoTracker(AlsoEntity, TrackerEntity):
         state = self.vehicle_state
         if state is None or state.altitude_raw is None:
             return None
-        # The altitude unit is NOT verified (it is not metres), so it is passed on as reported.
+        # The altitude unit is NOT verified (probably millimetres, an inference), so it is passed
+        # on exactly as reported.
         return {"altitude_raw": state.altitude_raw}

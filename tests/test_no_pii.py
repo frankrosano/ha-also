@@ -85,3 +85,41 @@ def test_main_returns_nonzero_on_findings(tmp_path: Path) -> None:
     assert module.main([str(tmp_path)]) == 0
     (tmp_path / "b.txt").write_text("reach me at " + "x" + "@" + "gmail.com\n", encoding="utf-8")
     assert module.main([str(tmp_path)]) == 1
+
+
+# ------------------------------------------------------------------ review fixes (#15)
+def test_letter_first_serials_are_caught_and_fake_ones_pass() -> None:
+    # Generated shapes (no literal that looks like a real serial in this file).
+    letter_first = "Q" + "7" + "A" * 4 + "9" * 12  # 18 characters, starts with a letter
+    digit_first = "7" + "Q" * 4 + "1" * 13
+    assert len(letter_first) == len(digit_first) == 18
+    assert _categories(f"serial {letter_first}") == {"serial-number-like string"}
+    assert _categories(f"serial {digit_first}") == {"serial-number-like string"}
+    # Not serials: pure letters (no digit), the fake convention, all zeros, longer/shorter runs.
+    assert _categories("Q" * 18) == set()
+    assert _categories("FAKE" + "0" * 13 + "1") == set()
+    assert _categories("0" * 18) == set()
+    assert _categories(letter_first + "Z") == set()  # 19 characters
+    assert _categories(letter_first[:-1]) == set()  # 17 characters
+
+
+def test_nanodegree_runs_of_nine_to_twelve_digits_are_caught() -> None:
+    twelve = "1" + "2" * 11  # a ~123 degree longitude as nanodegrees
+    eleven = "4" + "5" * 10
+    ten_not_epoch = "5" + "6" * 9  # 5.6e9: outside the unix-seconds range 2000-2100
+    nine = "7" + "8" * 8
+    for run in (twelve, eleven, ten_not_epoch, nine):
+        assert len(_categories(f"lon {run}")) == 1, run
+        assert len(_categories(f"lon -{run}")) == 1, run
+    assert len(_categories(f'"con_aLongitude": {twelve},')) == 1
+
+
+def test_nanodegree_rule_has_a_magnitude_check_and_ignores_timestamps_and_padding() -> None:
+    epoch_seconds = "17" + "0" * 8  # 1.7e9: a unix timestamp, not a position
+    epoch_millis = "17" + "0" * 11
+    too_big = "9" * 12  # more than 180 degrees as nanodegrees
+    padded = "0" * 9 + "1"
+    eight = "1" * 8  # fake data stays near 0,0
+    uuid_tail = "11111111-1111-4111-8111-" + "1" * 12  # an allowed fake UUID
+    for text in (epoch_seconds, epoch_millis, too_big, padded, eight, uuid_tail):
+        assert _categories(f"value {text}") == set(), text

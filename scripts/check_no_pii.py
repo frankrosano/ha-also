@@ -8,10 +8,14 @@ Looks (in files git would track: committed or untracked-but-not-ignored) for:
 * e-mail addresses outside example.com / example.org / example.net;
 * ALSO vehicle (``VHC-xxxx-xxxx-xxxx``) and user (``USR-xxxx-xxxx-xxxx``) reference ids other than
   the fake ``AAAA-BBBB-<CCCC|DDDD|EEEE>`` ones (users: ``CCCC`` and ``DDDD``);
-* 18-character serial-number-like strings starting with a digit (other than all zeros);
+* 18-character serial-number-like strings of digits and capital letters containing at least one
+  digit, starting with a digit OR a letter (other than all zeros and the ``FAKE``-prefixed test
+  serials);
 * UUIDs that are not obviously fake (all zeros, or one repeated digit);
-* coordinates: 11-digit integers (nanodegrees of 10 degrees or more) and decimals with six or more
-  fraction digits and an absolute value of 10 or more. Fake data must stay near 0,0;
+* coordinates: integers of 9 to 12 digits with a magnitude of at most 180 degrees in nanodegrees
+  (180e9), except 10-digit values in the unix-seconds range of the years 2000-2100, which are
+  indistinguishable from timestamps; and decimals with six or more fraction digits and an absolute
+  value of 10 or more. Fake data must stay near 0,0 (at most 8 digits as nanodegrees);
 * JWT-looking tokens and long bearer tokens;
 * machine-specific home-directory paths (a line containing ``developer-local`` is exempt).
 
@@ -33,12 +37,15 @@ ALLOWED_EMAIL_DOMAINS = frozenset({"example.com", "example.org", "example.net"})
 ALLOWED_VEHICLE_IDS = frozenset({"VHC-AAAA-BBBB-CCCC", "VHC-AAAA-BBBB-DDDD", "VHC-AAAA-BBBB-EEEE"})
 ALLOWED_USER_IDS = frozenset({"USR-AAAA-BBBB-CCCC", "USR-AAAA-BBBB-DDDD"})
 ALLOWED_SERIALS = frozenset({"000000000000000000"})
+ALLOWED_SERIAL_PREFIXES = ("FAKE",)
+MAX_NANODEGREES = 180_000_000_000
+EPOCH_SECONDS_RANGE = (946_684_800, 4_102_444_800)
 EXEMPT_MARKER = "developer-local"
 
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})")
 _VEHICLE = re.compile(r"\bVHC-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}\b")
 _USER = re.compile(r"\bUSR-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}\b")
-_SERIAL = re.compile(r"(?<![0-9A-Za-z])[0-9][0-9A-Z]{17}(?![0-9A-Za-z])")
+_SERIAL = re.compile(r"(?<![0-9A-Za-z])(?=[0-9A-Z]*[0-9])[0-9A-Z]{18}(?![0-9A-Za-z])")
 _UUID = re.compile(
     r"(?<![0-9A-Za-z])[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
     r"(?![0-9A-Za-z])"
@@ -47,7 +54,7 @@ _FAKE_UUIDS = (
     re.compile(r"0{8}-0{4}-[0-9a-f]000-[0-9a-f]000-0{11}[0-9a-f]", re.IGNORECASE),
     re.compile(r"([0-9a-f])\1{7}-\1{4}-[0-9a-f]\1{3}-[0-9a-f]\1{3}-\1{12}", re.IGNORECASE),
 )
-_NANO = re.compile(r"(?<![0-9A-Za-z_.])-?[0-9]{11}(?![0-9A-Za-z_.])")
+_NANO = re.compile(r"(?<![0-9A-Za-z_.])-?([0-9]{9,12})(?![0-9A-Za-z_.])")
 # ``(?<![0-9]:)`` skips clock times such as ``16:59:46.890053`` in log output.
 _DECIMAL = re.compile(r"(?<![0-9A-Za-z_.])(?<![0-9]:)(-?[0-9]{1,3})\.[0-9]{6,}(?![0-9A-Za-z_.])")
 _JWT = re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}")
@@ -72,6 +79,16 @@ class Finding:
         return f"{self.path}:{self.line}: {self.category}"
 
 
+def _is_nanodegree_like(digits: str) -> bool:
+    """Could this digit run be a coordinate in nanodegrees (and not a timestamp or a padded id)?"""
+    if digits.startswith("0"):
+        return False  # a real nanodegree integer has no leading zero
+    value = int(digits)
+    if value > MAX_NANODEGREES:
+        return False
+    return not (len(digits) == 10 and EPOCH_SECONDS_RANGE[0] <= value <= EPOCH_SECONDS_RANGE[1])
+
+
 def scan_text(text: str) -> Iterator[tuple[int, str]]:
     """Yield ``(line_number, category)`` for every suspicious line of ``text``."""
     for number, line in enumerate(text.splitlines(), start=1):
@@ -86,13 +103,15 @@ def scan_text(text: str) -> Iterator[tuple[int, str]]:
             if match.group(0) not in ALLOWED_USER_IDS:
                 yield number, "user reference id"
         for match in _SERIAL.finditer(line):
-            if match.group(0) not in ALLOWED_SERIALS:
+            serial = match.group(0)
+            if serial not in ALLOWED_SERIALS and not serial.startswith(ALLOWED_SERIAL_PREFIXES):
                 yield number, "serial-number-like string"
         for match in _UUID.finditer(line):
             if not any(fake.fullmatch(match.group(0)) for fake in _FAKE_UUIDS):
                 yield number, "uuid"
-        for _ in _NANO.finditer(line):
-            yield number, "coordinate-like integer (nanodegrees of 10 degrees or more)"
+        for match in _NANO.finditer(_UUID.sub(" ", line)):  # UUID tails are not coordinates
+            if _is_nanodegree_like(match.group(1)):
+                yield number, "coordinate-like integer (nanodegrees, 9 to 12 digits)"
         for match in _DECIMAL.finditer(line):
             if abs(int(match.group(1))) >= 10:
                 yield number, "coordinate-like decimal (10 degrees or more)"

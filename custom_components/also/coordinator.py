@@ -14,8 +14,11 @@ If the stream cannot be used (``grpcio`` missing, repeated failures) the integra
 on polling alone and logs ONE warning per outage (per bike), not one per retry.
 
 Availability follows EITHER source: entities stay available while a REST poll fails as long as the
-push stream is connected or delivered data recently (see :meth:`AlsoCoordinator.has_recent_push`).
-Home Assistant itself logs a failing poll once, when it starts failing.
+push stream DELIVERED DATA recently (see :meth:`AlsoCoordinator.has_recent_push`). A stream that is
+only connected (keep-alive replies, no data) does not keep entities available, and a per-bike
+timer re-evaluates availability at the freshness deadline, so entities flip to unavailable on time
+even when nothing else happens. Home Assistant itself logs a failing poll once, when it starts
+failing.
 """
 
 from __future__ import annotations
@@ -30,9 +33,10 @@ from functools import partial
 from typing import Any, Protocol
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.typing import UNDEFINED
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
@@ -57,6 +61,7 @@ from .const import (
     CONF_SCAN_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
+    PUSH_EXPIRY_GRACE_SECONDS,
     PUSH_FRESH_SECONDS,
     PUSH_WARN_AFTER_FAILURES,
     UNKNOWN_PACKET_HISTORY,
@@ -136,6 +141,10 @@ class AlsoCoordinator(DataUpdateCoordinator[dict[str, VehicleState]]):
         self._streams: dict[str, _StreamHandle] = {}
         self._push_started = False
         self._push_disabled = False
+        #: Bikes whose stream gave up for good (fatal status): not restarted by later polls.
+        self._push_given_up: set[str] = set()
+        #: Per-bike timers that re-evaluate availability when the last data event goes stale.
+        self._expiry_timers: dict[str, CALLBACK_TYPE] = {}
         #: Bikes whose current push outage was already logged (re-armed per bike on reconnect).
         self._outage_logged: set[str] = set()
         self._push_disabled_logged = False
@@ -180,23 +189,51 @@ class AlsoCoordinator(DataUpdateCoordinator[dict[str, VehicleState]]):
 
     @property
     def push_enabled(self) -> bool:
-        """True while push is in use; False after it was given up (polling only)."""
-        return self._stream_factory is not None and not self._push_disabled
+        """True while push is in use for at least one bike; False once it was given up for the
+        whole entry (grpc missing, start failure) or for every known bike (fatal stream status)."""
+        if self._stream_factory is None or self._push_disabled:
+            return False
+        known = set(self.data or {})
+        return not (known and known <= self._push_given_up)
+
+    def stream_active(self, vehicle_id: str) -> bool:
+        """True while a stream object exists for this bike (it may still be reconnecting)."""
+        return vehicle_id in self._streams
 
     def has_recent_push(self, vehicle_id: str) -> bool:
-        """True if the push stream of this bike is connected or delivered data recently.
+        """True if the push stream of this bike DELIVERED DATA recently.
 
         Used for entity availability: live data keeps the entities available while a REST poll
-        fails. "Recently" is three push cadences plus a margin (``PUSH_FRESH_SECONDS``).
+        fails. "Recently" is three push cadences plus a margin (``PUSH_FRESH_SECONDS``) since the
+        last data event; keep-alive replies are not data, and neither is a mere ``connected``
+        flag (a stream can stay connected for hours without delivering anything). Time passing
+        triggers nothing by itself: see :meth:`_arm_expiry`.
         """
         status = self._push_status.get(vehicle_id)
-        if status is None:
-            return False
-        if status.connected:
-            return True
-        if status.last_event is None:
+        if status is None or status.last_event is None:
             return False
         return (dt_util.utcnow() - status.last_event).total_seconds() <= PUSH_FRESH_SECONDS
+
+    @callback
+    def _arm_expiry(self, vehicle_id: str) -> None:
+        """(Re)schedule the timer that rewrites availability when this bike's data goes stale."""
+        self._cancel_expiry(vehicle_id)
+        self._expiry_timers[vehicle_id] = async_call_later(
+            self.hass,
+            PUSH_FRESH_SECONDS + PUSH_EXPIRY_GRACE_SECONDS,
+            partial(self._on_expiry, vehicle_id),
+        )
+
+    @callback
+    def _cancel_expiry(self, vehicle_id: str) -> None:
+        if (cancel := self._expiry_timers.pop(vehicle_id, None)) is not None:
+            cancel()
+
+    @callback
+    def _on_expiry(self, vehicle_id: str, _now: datetime) -> None:
+        """The freshness deadline passed: entities re-evaluate ``has_recent_push``."""
+        self._expiry_timers.pop(vehicle_id, None)
+        self.async_update_listeners()
 
     def push_status(self, vehicle_id: str) -> PushStatus:
         """Push state of one bike (a default, disconnected status for unknown bikes)."""
@@ -215,7 +252,7 @@ class AlsoCoordinator(DataUpdateCoordinator[dict[str, VehicleState]]):
             if not self._vehicles or self._updates % VEHICLE_LIST_EVERY_N_UPDATES == 0:
                 await self._async_refresh_vehicles()
             self._updates += 1
-            states = await asyncio.gather(
+            fetched = await asyncio.gather(
                 *(self.client.get_vehicle_state(vid, v) for vid, v in self._vehicles.items())
             )
         except AlsoAuthError as err:
@@ -225,7 +262,17 @@ class AlsoCoordinator(DataUpdateCoordinator[dict[str, VehicleState]]):
             raise UpdateFailed(str(err), retry_after=err.retry_after) from err
         except (AlsoConnectionError, AlsoApiError) as err:
             raise UpdateFailed(f"Error communicating with ALSO: {err}") from err
-        data = {state.vehicle_id: state for state in states}
+        # Each state was captured when ITS REST calls finished. A push that arrived since (while
+        # another bike's calls were still in flight) lives in ``self.data``: fold it back in, newest
+        # source time wins, so assigning the result cannot throw a newer pushed value away.
+        previous = self.data or {}
+        data: dict[str, VehicleState] = {}
+        for state in fetched:
+            earlier = previous.get(state.vehicle_id)
+            folded = state.carry_newer_from(earlier) if earlier is not None else state
+            # Keep the library's own object when nothing newer was folded in, so the identity check
+            # in async_apply_push_update ("nothing changed") keeps working.
+            data[state.vehicle_id] = state if folded == state else folded
         for vehicle_id, state in data.items():
             self._async_sync_device(vehicle_id, state)
         await self._async_sync_streams(set(data))
@@ -279,6 +326,7 @@ class AlsoCoordinator(DataUpdateCoordinator[dict[str, VehicleState]]):
                 summary["length"],
             )
         self.push_status(vehicle_id).last_event = dt_util.utcnow()
+        self._arm_expiry(vehicle_id)
         changed = False
         if not isinstance(event, UnknownPacket):
             update = updates_from_event(event)
@@ -320,8 +368,19 @@ class AlsoCoordinator(DataUpdateCoordinator[dict[str, VehicleState]]):
 
     @callback
     def _on_fatal(self, vehicle_id: str, status: ConnectionStatus) -> None:
-        """A stream gave up for good: re-authenticate, or fall back to polling only."""
+        """A stream gave up for good: re-authenticate, or fall back to polling only.
+
+        The stream object is released (stopped, listeners detached) and the bike is marked as
+        given up, so later polls do not restart it and diagnostics report polling only. Cleanup
+        does not depend on how pyalso tore itself down.
+        """
         self.push_status(vehicle_id).unavailable = True
+        self._push_given_up.add(vehicle_id)
+        self.config_entry.async_create_background_task(
+            self.hass,
+            self._async_stop_stream(vehicle_id, keep_reason=True),
+            name="also_release_failed_stream",
+        )
         if isinstance(status.error, AlsoAuthError):
             # Same outcome as ConfigEntryAuthFailed raised by a refresh: start the reauth flow.
             _LOGGER.debug("Stream authentication failed; starting reauthentication")
@@ -346,7 +405,7 @@ class AlsoCoordinator(DataUpdateCoordinator[dict[str, VehicleState]]):
             return
         for vehicle_id in [v for v in self._streams if v not in wanted]:
             await self._async_stop_stream(vehicle_id)
-        for vehicle_id in sorted(wanted - set(self._streams)):
+        for vehicle_id in sorted(wanted - set(self._streams) - self._push_given_up):
             if self._push_disabled:
                 return
             await self._async_start_stream(vehicle_id)
@@ -380,7 +439,9 @@ class AlsoCoordinator(DataUpdateCoordinator[dict[str, VehicleState]]):
             unsubscribe()
         handle.unsubscribe.clear()
 
-    async def _async_stop_stream(self, vehicle_id: str) -> None:
+    async def _async_stop_stream(self, vehicle_id: str, *, keep_reason: bool = False) -> None:
+        """Stop and forget one bike's stream; ``keep_reason`` keeps the last status reason (the
+        fatal one) instead of replacing it with ``stopped``."""
         handle = self._streams.pop(vehicle_id, None)
         if handle is None:
             return
@@ -392,7 +453,10 @@ class AlsoCoordinator(DataUpdateCoordinator[dict[str, VehicleState]]):
         status = self._push_status.get(vehicle_id)
         if status is not None:
             status.connected = False
-            status.reason = "stopped"
+            if not keep_reason:
+                status.reason = "stopped"
+        if keep_reason:
+            self.async_update_listeners()  # a fatal stop changes what entities and diagnostics show
 
     async def _async_disable_push(self, why: str) -> None:
         """Give up on push for this entry: warn ONCE and keep polling."""
@@ -416,6 +480,8 @@ class AlsoCoordinator(DataUpdateCoordinator[dict[str, VehicleState]]):
         self._push_started = False
         for vehicle_id in list(self._streams):
             await self._async_stop_stream(vehicle_id)
+        for vehicle_id in list(self._expiry_timers):
+            self._cancel_expiry(vehicle_id)
 
     async def async_shutdown(self) -> None:
         """Stop the streams along with the coordinator (entry unload)."""
