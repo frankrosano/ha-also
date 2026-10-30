@@ -1,4 +1,8 @@
 # Changelog
+## Unreleased
+* Brand images: the integration ships its ALSO icon, wordmark logo and a white (dark mode) logo in
+  `custom_components/also/brand/` (Home Assistant 2026.3 and newer shows them; older versions ignore them).
+  The `ignore: brands` line is gone from the HACS validation workflow. See the README section Branding.
 
 ## 0.2.2
 

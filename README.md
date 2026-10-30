@@ -84,6 +84,9 @@ If the stream cannot be used (`grpcio` is missing, or it keeps failing) the inte
 - Read only: no remote commands.
 - Google and Apple sign-in are not supported.
 
+## Branding
+The ALSO name, logo and app icon are trademarks and property of ALSO (the e-bike maker). The images in `custom_components/also/brand/` were taken from the official ALSO mobile app and are used only to identify this integration in Home Assistant (2026.3 and newer). This project is not affiliated with or endorsed by ALSO. The images will be removed on request.
+
 ## Development
 
 Needs Python 3.13.2 or newer and [uv](https://docs.astral.sh/uv/).

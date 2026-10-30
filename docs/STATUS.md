@@ -100,6 +100,21 @@ The `.venv` here has pyalso installed editable with the push extra (`uv pip inst
    - ride (location, velocity, ride/energy/drive packets, odometer; check the altitude and speed units);
    - leave Home Assistant running overnight and check that the stream survives the access-token expiry (watch `last_status` and `failed_attempts`, and the log for the single outage warning).
 2. Flip the `fields.py` verified flags in pyalso and add entities (ride mode, power state, range) for what the experiments confirm; add `charging` / `charging_issue` to the charge state options once seen.
-3. Optionally publish pyalso to PyPI and switch the manifest requirement from the GitHub release archive to a pinned PyPI version. Add brand images (`brand/` folder) and remove `ignore: brands` from the HACS workflow.
+3. Optionally publish pyalso to PyPI and switch the manifest requirement from the GitHub release archive to a pinned PyPI version.
 4. Run hassfest and a Python 3.14 check when the newer test package is wanted.
 5. Done in 0.2.2: tests for a failing token persist, a vehicle vanishing from the account, fixed32 masking and the public wire re-export. Still open: a micro-degree coordinate stored in a small integer field of an unknown packet would remain visible (small integers are kept on purpose).
+## 5. Brand images
+Added (unreleased, see `CHANGELOG.md`): `custom_components/also/brand/` with `icon.png` (256x256), `logo.png` (1041x256) and `dark_logo.png` (1040x256), each with a twin whose name has the `@2x` suffix before `.png` and twice the size (512x512, 2082x512 and 2081x512). All are under 100 KB. `tests/test_brand.py` checks names, PNG validity, dimensions and size. The README has a Branding section (trademark and no-affiliation notice, removal on request).
+Sources, all from the official ALSO mobile apps (version 2026.31.1) and only cropped, scaled and converted, never redrawn:
+- Icon: the 1024x1024 app icon from the iOS app's asset catalog (a lavender square with a dark purple disc). The Android adaptive icon background and foreground vectors describe the same two shapes and colours. It is full-bleed and opaque, scaled down with Lanczos. There is no separate dark variant, so no `dark_icon.png`.
+- Logo: the "ALSO." wordmark, shipped as a vector (SVG) in the iOS asset catalog in a dark version (near black) and a white version, and as a white vector drawable in the Android app. The vectors were rendered at 4096 px width with a transparent background, trimmed to the glyph bounds and scaled to 256 px (and 512 px) height. The dark version is `logo.png` (for light backgrounds) and the white version is `dark_logo.png` (for dark backgrounds).
+- Not used: the Android launcher bitmaps. Their foreground image is a third-party cartoon character, not ALSO artwork, and the legacy bitmap is a plain placeholder.
+HACS: the `brands` check of the HACS validation now looks for `brand/icon.png` inside the integration folder first and only falls back to the home-assistant/brands repository, so `ignore: brands` was removed from `.github/workflows/validate.yml`. The next CI run confirms it.
+Documents consulted:
+- https://contributors.home-assistant.io/blog/2026/02/24/brands-proxy-api/ (also at developers.home-assistant.io): local `brand/` folder, supported file names, local images take priority.
+- https://contributors.home-assistant.io/core/integrations/brands/ : image requirements (PNG, transparent background preferred, trimmed, icon 256 and 512 square, logo shorter side 128 to 256 and 256 to 512, dark variants only if needed) and the section on custom integrations.
+- https://contributors.home-assistant.io/core/integrations/file-structure/ : brand images in custom integrations.
+- https://hacs.xyz/docs/publish/include/ (section "Check brands"): the check wants a `brand` directory with at least `icon.png` and falls back to the brands repository.
+- https://hacs.xyz/docs/publish/action : the action's `ignore` input and the list of ignorable checks.
+- https://github.com/hacs/integration/blob/main/custom_components/hacs/validate/brands.py : the validator source (looks for `<integration path>/brand/icon.png`).
+- https://github.com/hacs/action/issues/44 : the issue asking for this behaviour.

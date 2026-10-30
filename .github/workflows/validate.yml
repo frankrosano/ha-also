@@ -21,5 +21,3 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
-          # No brand images in this repo yet.
-          ignore: brands

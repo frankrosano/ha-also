@@ -1,16 +1,23 @@
 # Gate results
-Run on 2026-10-15 13:08 EDT, version 0.2.2. Command output below is verbatim (stdout and stderr combined, colour disabled); the only edit is that the machine-specific path prefix of the workspace is replaced by `<workspace>/`. No live network is used by any test, and no request to the real ALSO service was made while producing this evidence.
+
+Run on 2026-10-30 15:58 EDT, version 0.2.2 plus the unreleased brand images. Command output below is verbatim (stdout and stderr combined, colour disabled); the only edit is that the machine-specific path prefix of the workspace is replaced by `<workspace>/`. No live network is used by any test, and no request to the real ALSO service was made while producing this evidence.
+
 ## `uv run ruff check`
+
 Exit code: 0
 ```text
 All checks passed!
 ```
+
 ## `uv run ruff format --check`
+
 Exit code: 0
 ```text
-31 files already formatted
+32 files already formatted
 ```
+
 ## `uv run pytest`
+
 Exit code: 0
 ```text
 ============================= test session starts ==============================
@@ -20,26 +27,30 @@ configfile: pyproject.toml
 testpaths: tests
 plugins: respx-0.22.0, pytest_freezer-0.4.9, unordered-0.7.0, homeassistant-custom-component-0.13.316, sugar-1.0.0, socket-0.7.0, xdist-3.8.0, timeout-2.4.0, github-actions-annotate-failures-0.3.0, asyncio-1.3.0, aiohttp-1.1.0, anyio-4.15.1, picked-0.5.1, requests-mock-1.12.1, cov-7.0.0, syrupy-5.0.0
 asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
-collected 128 items
+collected 143 items
 
 tests/test_availability.py .....                                         [  3%]
-tests/test_config_flow.py ...................                            [ 18%]
-tests/test_contract.py ......                                            [ 23%]
-tests/test_diagnostics.py ...                                            [ 25%]
-tests/test_init.py ................                                      [ 38%]
-tests/test_lifecycle.py .......                                          [ 43%]
-tests/test_no_pii.py ........                                            [ 50%]
-tests/test_privacy_and_discovery.py ........                             [ 56%]
-tests/test_push.py ............................................          [ 90%]
+tests/test_brand.py ...............                                      [ 13%]
+tests/test_config_flow.py ...................                            [ 27%]
+tests/test_contract.py ......                                            [ 31%]
+tests/test_diagnostics.py ...                                            [ 33%]
+tests/test_init.py ................                                      [ 44%]
+tests/test_lifecycle.py .......                                          [ 49%]
+tests/test_no_pii.py ........                                            [ 55%]
+tests/test_privacy_and_discovery.py ........                             [ 60%]
+tests/test_push.py ............................................          [ 91%]
 tests/test_sensor.py ............                                        [100%]
 
-============================= 128 passed in 3.49s ==============================
+============================= 143 passed in 4.12s ==============================
 ```
+
 ## `python3 scripts/check_no_pii.py`
+
 Exit code: 0
 ```text
 PII scan: no findings.
 ```
+
 ## PII scan
 Command: `python3 scripts/check_no_pii.py` (also run by `tests/test_no_pii.py` inside the pytest gate). The output is in the section above. The script is the same file as pyalso's, widened in 0.2.2 (letter-first serials, 9 to 12 digit nanodegree integers); `tests/test_no_pii.py` has the same runtime-generated regression cases.
 
