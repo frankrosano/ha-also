@@ -14,7 +14,7 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from pyalso import AlsoAuth, AlsoClient, AlsoStream, Tokens
 
-from .const import DOMAIN, PLATFORMS
+from .const import DOMAIN, PLATFORMS, REMOVED_ENTITY_KEYS
 from .coordinator import AlsoConfigEntry, AlsoCoordinator, PushStream
 
 _LOGGER = logging.getLogger(__name__)
@@ -92,6 +92,44 @@ def _migrate_odometer(entry: er.RegistryEntry) -> dict[str, str] | None:
     return None
 
 
+def _is_removed_entity(reg: er.RegistryEntry) -> bool:
+    """True for a sensor of this integration that 0.3.0 removed (see ``REMOVED_ENTITY_KEYS``).
+
+    Unique ids are ``<vehicle_id>_<key>`` and vehicle ids contain no underscore, so the key is
+    everything after the FIRST underscore and must match exactly.
+    """
+    if reg.domain != "sensor" or reg.platform != DOMAIN:
+        return False
+    vehicle_id, separator, key = reg.unique_id.partition("_")
+    return bool(vehicle_id and separator) and key in REMOVED_ENTITY_KEYS
+
+
+@callback
+def _async_clean_up_registry(hass: HomeAssistant, entry: AlsoConfigEntry) -> None:
+    """Delete the registry entries of removed entities and re-enable integration-disabled ones.
+
+    Before 0.3.0 some entities were disabled by default (``disabled_by=INTEGRATION``); every entity
+    is enabled by default now, so those are re-enabled. Entities disabled by the USER (or by a
+    device, config entry or Home Assistant itself) are never touched, and nothing is re-enabled
+    while the entry's "enable newly added entities" system option is off (Home Assistant marks new
+    entities INTEGRATION-disabled then).
+    """
+    registry = er.async_get(hass)
+    removed = enabled = 0
+    for reg in er.async_entries_for_config_entry(registry, entry.entry_id):
+        if _is_removed_entity(reg):
+            registry.async_remove(reg.entity_id)
+            removed += 1
+        elif (
+            reg.disabled_by is er.RegistryEntryDisabler.INTEGRATION
+            and not entry.pref_disable_new_entities
+        ):
+            registry.async_update_entity(reg.entity_id, disabled_by=None)
+            enabled += 1
+    if removed or enabled:
+        _LOGGER.debug("Removed %s obsolete and re-enabled %s entities", removed, enabled)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: AlsoConfigEntry) -> bool:
     """Set up ALSO from a config entry."""
     try:
@@ -109,6 +147,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: AlsoConfigEntry) -> bool
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
     await er.async_migrate_entries(hass, entry.entry_id, _migrate_odometer)
+    # Before the platforms: the sensor platform restores discovered sensors from the registry.
+    _async_clean_up_registry(hass, entry)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_entry_updated))
 

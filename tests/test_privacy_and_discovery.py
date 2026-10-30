@@ -195,7 +195,7 @@ def _ride() -> RideInfoEvent:
     )
 
 
-async def test_stream_only_values_become_disabled_diagnostic_sensors(
+async def test_stream_only_values_become_enabled_diagnostic_sensors(
     hass: HomeAssistant, init_integration: MockConfigEntry, mock_pyalso: PyalsoMocks
 ) -> None:
     """Regression: discovery only looked at the REST shadow, so push-only values (speed, range,
@@ -219,14 +219,19 @@ async def test_stream_only_values_become_disabled_diagnostic_sensors(
         entity_id = registry.async_get_entity_id("sensor", DOMAIN, uid(key))
         assert entity_id, key
         reg = registry.async_get(entity_id)
-        assert reg.disabled_by is er.RegistryEntryDisabler.INTEGRATION
+        assert reg.disabled_by is None  # enabled by default
         assert reg.entity_category is EntityCategory.DIAGNOSTIC
         assert "(stream)" in (reg.original_name or "")
-    # Never discovered: values that already have an entity, and strings.
-    stream.emit(
-        __import__("tests.common", fromlist=["battery_event"]).battery_event(55, at=BASE_TIME + 100)
+    # Never discovered: values that already have (or are merged into) an entity, positions, and
+    # strings.
+    common = __import__(
+        "tests.common", fromlist=["battery_event", "location_event", "odometer_event"]
     )
+    stream.emit(common.battery_event(55, at=BASE_TIME + 100))
+    stream.emit(common.location_event())
+    stream.emit(common.odometer_event(123_500))
     await hass.async_block_till_done()
+    assert "satellite_count" in get_coordinator(init_integration).data[VEHICLE_ID].push
     for key in (
         "battery_level_percent",
         "charge_limit_percent",
@@ -235,6 +240,13 @@ async def test_stream_only_values_become_disabled_diagnostic_sensors(
         "battery_charging_state_raw",
         "battery_serial",
         "firmware_version",
+        "velocity_raw",
+        "odometer_mi",
+        "satellite_count",
+        "latitude_nano",
+        "longitude_nano",
+        "altitude_raw",
+        "location_updated_at",
     ):
         assert registry.async_get_entity_id("sensor", DOMAIN, uid(key)) is None, key
     # The stream's power/ride enums are different from the shadow's: separate entities.
@@ -283,6 +295,11 @@ def test_every_charge_state_option_is_translated_and_both_string_files_agree() -
     assert strings == english
     labels = strings["entity"]["sensor"]["charge_state"]["state"]
     assert set(CHARGE_STATE_OPTIONS) <= set(labels)
-    assert labels["unknown_2"] == "Unknown (2)"  # neutral: the meaning was never observed
+    assert labels["charging"] == "Charging"  # verified by observation (2026-10-30)
+    assert "unknown_2" not in labels
+    assert labels["unknown_4"] == "Unknown (4)"  # neutral: the meaning was never observed
+    sensors = strings["entity"]["sensor"]
+    assert "charge_state_raw" not in sensors  # removed entity
+    assert sensors["speed_raw"]["name"] == "Speed (raw)"
     assert "token_store_failed" in strings["issues"]
     assert WIRE_LEN == 2  # (the public re-export used by the diagnostics code)

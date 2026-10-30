@@ -113,6 +113,20 @@ async def async_get_config_entry_diagnostics(
                 # numbers are shown side by side so a mismatch is visible.
                 "charging_state_raw": state.battery_charging_state_raw,
                 "shadow_charge_state_raw": state.charge_state_raw,
+                # Whether pyalso treats the stream as connected (stream values preferred), and
+                # which source each merged value currently comes from.
+                "stream_connected": state.stream_connected,
+                "sources": {
+                    "battery_level": state.battery_level_merged.source,
+                    "charge_limit": state.charge_limit_merged.source,
+                    "odometer": state.odometer_merged.source,
+                    "charge_state": state.charging_state_merged.source,
+                    "position": state.position_merged.source,
+                    "altitude": state.altitude_merged.source,
+                    "satellite_count": state.satellite_count_merged.source,
+                    "last_location_update": state.last_updated_merged.source,
+                    "speed": state.speed_merged.source,
+                },
                 "connected": status.connected,
                 "last_status": status.reason,
                 "last_event": status.last_event.isoformat() if status.last_event else None,

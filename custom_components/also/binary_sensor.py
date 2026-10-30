@@ -56,7 +56,6 @@ class AlsoPushConnectedSensor(AlsoEntity, BinarySensorEntity):
 
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_entity_registry_enabled_default = False
     _attr_translation_key = "push_connected"
 
     def __init__(self, coordinator: AlsoCoordinator, vehicle_id: str) -> None:

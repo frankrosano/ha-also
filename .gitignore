@@ -20,3 +20,4 @@ tokens*.json
 
 # Kiro IDE working files
 .kiro/
+.worktrees/

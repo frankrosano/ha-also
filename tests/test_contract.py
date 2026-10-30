@@ -256,7 +256,8 @@ async def test_a_push_that_lands_mid_poll_survives_on_a_two_bike_account(
     await asyncio.wait_for(service.wait_answered(VEHICLE_ID, "connectivity", 2), 5)
     await asyncio.wait_for(service.wait_answered(VEHICLE_ID, "location", 2), 5)
     await asyncio.sleep(0.1)
-    # Bike one's REST result is ready; now its stream delivers a newer battery level.
+    # Bike one's REST result is ready; now its (connected) stream delivers a battery level.
+    wired_two.streams.latest(VEHICLE_ID).status(True)
     wired_two.streams.latest(VEHICLE_ID).emit(battery_event(23, at=BASE_TIME + 300))
     assert float(hass.states.get(level_id).state) == 23
     service.release_shadow(VEHICLE_ID_2)
@@ -270,7 +271,7 @@ async def test_a_push_that_lands_mid_poll_survives_on_a_two_bike_account(
     await hass.config_entries.async_unload(entry.entry_id)
 
 
-async def test_rest_and_push_agree_on_newest_wins_through_the_real_client(
+async def test_rest_and_push_follow_stream_first_through_the_real_client(
     hass: HomeAssistant, service: FakeAlsoService, wired: Wired
 ) -> None:
     entry = make_entry()
@@ -279,15 +280,21 @@ async def test_rest_and_push_agree_on_newest_wins_through_the_real_client(
     await hass.async_block_till_done()
     coordinator = get_coordinator(entry)
     stream = wired.streams.latest()
+    stream.status(True)
     stream.emit(battery_event(40, at=BASE_TIME + 200))
     assert coordinator.data[VEHICLE_ID].battery_level == 40
-    # A REST poll whose report is OLDER than the pushed level does not roll it back ...
+    # A REST poll does not roll the live stream value back ...
     await coordinator.async_refresh()
     assert coordinator.data[VEHICLE_ID].battery_level == 40
-    # ... a REST report that is newer does.
+    # ... not even a REST report that is newer, while the stream is connected ...
     service.shadow_overrides[VEHICLE_ID] = {"bms_rSOCDisp": 70.0, "con_tUtc": BASE_TIME + 500}
     await coordinator.async_refresh()
+    assert coordinator.data[VEHICLE_ID].battery_level == 40
+    assert coordinator.data[VEHICLE_ID].stream_connected
+    # ... but a disconnect falls back to REST at once.
+    stream.status(False, "stream_ended")
     assert coordinator.data[VEHICLE_ID].battery_level == 70.0
+    assert coordinator.data[VEHICLE_ID].battery_level_merged.source == "rest"
     # The stream's own copy was kept apart from the REST shadow key the whole time.
     assert coordinator.data[VEHICLE_ID].push["battery_level_percent"] == 40
     assert coordinator.data[VEHICLE_ID].shadow["bms_rSOCDisp"] == 70.0

@@ -49,7 +49,7 @@ MANUFACTURER = "ALSO"
 SHADOW_UNIQUE_ID_INFIX = "shadow_"
 PUSH_UNIQUE_ID_INFIX = "push_"
 # Shadow keys that already have a dedicated entity (or are position data). Everything else that is
-# numeric/boolean is exposed through disabled-by-default auto-discovered diagnostic sensors.
+# numeric/boolean is exposed through auto-discovered diagnostic sensors.
 SHADOW_KEY_SOC_DISPLAY = "bms_rSOCDisp"
 SHADOW_KEY_SOC_REAL = "bms_rSOCReal"
 SHADOW_KEY_SOC_CHARGE_LIMIT = "bms_rSOCChargeSetFb"
@@ -63,6 +63,7 @@ SHADOW_KEY_TIME_UTC = "con_tUtc"
 SHADOW_KEY_LATITUDE = "con_aLatitude"
 SHADOW_KEY_LONGITUDE = "con_aLongitude"
 SHADOW_KEY_ALTITUDE = "con_zAltitude"
+SHADOW_KEY_SPEED = "pcm_vVehicleFilt"
 
 EXPLICIT_SHADOW_KEYS: frozenset[str] = frozenset(
     {
@@ -79,13 +80,14 @@ EXPLICIT_SHADOW_KEYS: frozenset[str] = frozenset(
         SHADOW_KEY_LATITUDE,
         SHADOW_KEY_LONGITUDE,
         SHADOW_KEY_ALTITUDE,
+        SHADOW_KEY_SPEED,
     }
 )
 
 # Stream-only (``state.push``) keys that already have a dedicated entity, are the stream's copy of a
-# value an explicit entity shows (state of charge and charge limit: ``battery_level`` and
-# ``charge_limit`` pick the newer of REST and stream), or are not numbers. Everything else numeric
-# is exposed through disabled-by-default diagnostic sensors. Position-like keys are excluded by
+# value an explicit (merged) entity shows (pyalso uses the stream value while the stream is
+# connected and delivered it, else the REST value), or are not numbers. Everything else numeric is
+# exposed through auto-discovered diagnostic sensors. Position-like keys are also excluded by
 # ``privacy.is_position_key``.
 EXPLICIT_PUSH_KEYS: frozenset[str] = frozenset(
     {
@@ -96,6 +98,23 @@ EXPLICIT_PUSH_KEYS: frozenset[str] = frozenset(
         "battery_charging_state_raw",
         "firmware_version",
         "model_name",
+        "odometer_mi",
+        "satellite_count",
+        "velocity_raw",
+        "location_updated_at",
+        "latitude_nano",
+        "longitude_nano",
+        "altitude_raw",
+    }
+)
+
+# Sensor keys (the unique id without its ``<vehicle_id>_`` prefix) of entities that 0.3.0 removed
+# because their value is now part of a merged entity. Their registry entries are deleted on setup.
+REMOVED_ENTITY_KEYS: frozenset[str] = frozenset(
+    {
+        "charge_state_raw",  # REST con_NChargeState: now the rest_raw attribute of charge_state
+        f"{SHADOW_UNIQUE_ID_INFIX}{SHADOW_KEY_SPEED}",  # merged into speed_raw
+        f"{PUSH_UNIQUE_ID_INFIX}velocity_raw",  # merged into speed_raw
     }
 )
 
@@ -121,6 +140,7 @@ __all__ = [
     "PUSH_FRESH_SECONDS",
     "PUSH_UNIQUE_ID_INFIX",
     "PUSH_WARN_AFTER_FAILURES",
+    "REMOVED_ENTITY_KEYS",
     "SHADOW_UNIQUE_ID_INFIX",
     "UNKNOWN_PACKET_HISTORY",
     "VEHICLE_LIST_EVERY_N_UPDATES",

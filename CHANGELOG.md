@@ -1,5 +1,37 @@
 # Changelog
-## Unreleased
+## 0.3.0
+One entity per value: a value that both the push stream and REST report is merged, with the stream
+preferred while it is connected and has delivered the value, and REST as the fallback. Needs pyalso
+0.3.0.
+
+**Breaking:**
+* Removed entities, deleted from the entity registry on setup. Automations, scripts and dashboards
+  that use them break:
+  * `<bike>_charge_state_raw` ("Charge state (shadow, raw)", REST `con_NChargeState`): now the
+    `rest_raw` attribute of Charge state.
+  * `<bike>_shadow_pcm_vVehicleFilt` (auto-discovered `pcm_vVehicleFilt`) and
+    `<bike>_push_velocity_raw` (auto-discovered `velocity_raw (stream)`): now the new Speed (raw)
+    sensor.
+* Charge state: the attribute `charging_state_raw` is replaced by `source` / `stream_raw` /
+  `rest_raw`. It now falls back to REST (0 = not charging, 2 = charging, 3 = fully charged; other
+  REST numbers are unknown) instead of staying unknown without push data. The stream's 2 is the
+  named option `charging` ("Charging"); `unknown_2` is gone.
+* Time until fully charged is unknown (no longer 0) when the stream leaves the value out, as
+  observed while charging.
+* Battery level, charge limit, odometer, GPS satellites, last location update and the location
+  tracker follow the stream-first rule instead of "the newest source time wins": while the stream is
+  connected, a cached stream value beats a newer REST value.
+
+Other changes:
+* Every entity is enabled by default, including the auto-discovered "(stream)" and shadow sensors,
+  Battery level (real) and Push connected. Entities the integration had disabled are re-enabled on
+  setup; entities a user disabled are untouched, and nothing is re-enabled while the entry's
+  "Enable newly added entities" system option is off.
+* New Speed (raw) diagnostic sensor (stream GPS velocity, else REST `pcm_vVehicleFilt`; raw, no unit).
+* Merged entities carry the attributes `source`, `stream_raw` and `rest_raw`; the tracker carries
+  `source`.
+* Diagnostics show `stream_connected` and the per-value `sources`.
+* The manifest requires pyalso `v0.3.0`.
 * Brand images: the integration ships its ALSO icon, wordmark logo and a white (dark mode) logo in
   `custom_components/also/brand/` (Home Assistant 2026.3 and newer shows them; older versions ignore them).
   The `ignore: brands` line is gone from the HACS validation workflow. See the README section Branding.

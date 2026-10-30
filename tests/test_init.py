@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
-from homeassistant.config_entries import ConfigEntryState
+from homeassistant.config_entries import ConfigEntryDisabler, ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from pyalso import (
@@ -35,6 +35,7 @@ from .common import (
     REFRESH_TOKEN,
     VEHICLE_ID,
     VEHICLE_ID_2,
+    battery_event,
     make_entry,
     make_vehicle,
 )
@@ -225,3 +226,122 @@ async def test_apply_push_update_merges_and_notifies(
 async def test_unload(hass: HomeAssistant, init_integration: MockConfigEntry) -> None:
     assert await hass.config_entries.async_unload(init_integration.entry_id)
     assert init_integration.state is ConfigEntryState.NOT_LOADED
+
+
+# ------------------------------------------------------- registry cleanup on setup (0.3.0)
+def _pre_create(
+    registry: er.EntityRegistry,
+    entry: MockConfigEntry,
+    key: str,
+    *,
+    domain: str = "sensor",
+    disabled_by: er.RegistryEntryDisabler | None = None,
+) -> str:
+    return registry.async_get_or_create(
+        domain, DOMAIN, f"{VEHICLE_ID}_{key}", config_entry=entry, disabled_by=disabled_by
+    ).entity_id
+
+
+async def test_setup_removes_exactly_the_merged_away_entities(
+    hass: HomeAssistant, mock_pyalso: PyalsoMocks
+) -> None:
+    entry = make_entry()
+    entry.add_to_hass(hass)
+    # Another (not loaded) config entry of the same domain: its registry entries are not ours.
+    other = make_entry(unique_id="someone-else", disabled_by=ConfigEntryDisabler.USER)
+    other.add_to_hass(hass)
+    registry = er.async_get(hass)
+    removed = [
+        _pre_create(registry, entry, key)
+        for key in ("charge_state_raw", "shadow_pcm_vVehicleFilt", "push_velocity_raw")
+    ]
+    kept = [
+        _pre_create(registry, entry, "shadow_pcm_vVehicleFiltX"),
+        _pre_create(registry, entry, "push_battery_charging_state_raw"),
+        _pre_create(registry, entry, "charge_state"),
+        _pre_create(registry, entry, "charge_state_raw", domain="binary_sensor"),
+    ]
+    foreign = registry.async_get_or_create(
+        "sensor", DOMAIN, f"{VEHICLE_ID_2}_charge_state_raw", config_entry=other
+    ).entity_id
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    for entity_id in removed:
+        assert registry.async_get(entity_id) is None, entity_id
+        assert hass.states.get(entity_id) is None, entity_id
+    for entity_id in [*kept, foreign]:
+        assert registry.async_get(entity_id) is not None, entity_id
+    # Not re-created by the platform's restore loop for discovered sensors, nor by a later poll.
+    await get_coordinator(entry).async_refresh()
+    await hass.async_block_till_done()
+    for key in ("charge_state_raw", "shadow_pcm_vVehicleFilt", "push_velocity_raw"):
+        assert registry.async_get_entity_id("sensor", DOMAIN, f"{VEHICLE_ID}_{key}") is None, key
+    assert registry.async_get_entity_id("sensor", DOMAIN, f"{VEHICLE_ID}_speed_raw")
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_setup_re_enables_integration_disabled_entities_only(
+    hass: HomeAssistant, mock_pyalso: PyalsoMocks
+) -> None:
+    entry = make_entry()
+    entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    integration = er.RegistryEntryDisabler.INTEGRATION
+    re_enabled = [
+        _pre_create(registry, entry, "battery_level_real", disabled_by=integration),
+        _pre_create(
+            registry, entry, "push_connected", domain="binary_sensor", disabled_by=integration
+        ),
+        _pre_create(registry, entry, "shadow_bms_NState", disabled_by=integration),
+        _pre_create(registry, entry, "push_bms_state_raw", disabled_by=integration),
+    ]
+    by_user = _pre_create(
+        registry, entry, "shadow_hu_NModeSelectorKnob", disabled_by=er.RegistryEntryDisabler.USER
+    )
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    for entity_id in re_enabled:
+        assert registry.async_get(entity_id).disabled_by is None, entity_id
+    assert hass.states.get(re_enabled[0]).state == "91.25"  # added without a reload
+    assert registry.async_get(by_user).disabled_by is er.RegistryEntryDisabler.USER
+    assert hass.states.get(by_user) is None
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_setup_keeps_entities_disabled_when_new_entities_are_not_enabled(
+    hass: HomeAssistant, mock_pyalso: PyalsoMocks
+) -> None:
+    entry = make_entry(pref_disable_new_entities=True)
+    entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    disabled = _pre_create(
+        registry, entry, "battery_level_real", disabled_by=er.RegistryEntryDisabler.INTEGRATION
+    )
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert registry.async_get(disabled).disabled_by is er.RegistryEntryDisabler.INTEGRATION
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+# ------------------------------------------------------------ stream connection -> pyalso
+async def test_connection_changes_reach_the_vehicle_state(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_pyalso: PyalsoMocks
+) -> None:
+    coordinator = get_coordinator(init_integration)
+    stream = mock_pyalso.streams.latest()
+    assert not coordinator.data[VEHICLE_ID].stream_connected
+    stream.status(True)
+    assert coordinator.data[VEHICLE_ID].stream_connected
+    stream.emit(battery_event(55, at=BASE_TIME + 100))
+    assert coordinator.data[VEHICLE_ID].battery_level_merged.source == "stream"
+    stream.status(False, "stream_ended")
+    assert not coordinator.data[VEHICLE_ID].stream_connected
+    assert coordinator.data[VEHICLE_ID].battery_level == 87.5  # REST at once
+
+    stream.status(True)
+    assert coordinator.data[VEHICLE_ID].stream_connected
+    await coordinator.async_stop_push()  # stopping a stream marks it disconnected as well
+    assert not coordinator.data[VEHICLE_ID].stream_connected
+    assert not mock_pyalso.client.real.set_stream_connected(VEHICLE_ID, False).stream_connected

@@ -55,13 +55,9 @@ async def test_a_connected_but_data_silent_stream_does_not_keep_entities_availab
         "binary_sensor", DOMAIN, f"{VEHICLE_ID}_push_connected"
     )
     assert entity_id
-    registry.async_update_entity(entity_id, disabled_by=None)
-    mock_pyalso.client.get_vehicle_state.side_effect = working_rest  # (the reload polls once)
-    await hass.config_entries.async_reload(init_integration.entry_id)
-    await hass.async_block_till_done()
-    mock_pyalso.streams.latest().status(True)
-    await hass.async_block_till_done()
+    assert registry.async_get(entity_id).disabled_by is None  # enabled by default
     assert hass.states.get(entity_id).state == STATE_ON
+    mock_pyalso.client.get_vehicle_state.side_effect = working_rest
 
 
 async def test_data_events_keep_entities_available_while_rest_is_down(

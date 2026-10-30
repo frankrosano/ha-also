@@ -32,17 +32,26 @@ async def test_sensor_states(hass: HomeAssistant, init_integration: MockConfigEn
     expected = {
         "battery_level": "87.5",
         "charge_limit": "90.0",
-        "charge_state": STATE_UNKNOWN,  # push only: unknown until the stream delivered data
-        "charge_state_raw": "3",  # the REST shadow value, a different enum
+        "charge_state": "fully_charged",  # REST con_NChargeState 3, mapped (no stream yet)
         "power_state_raw": "1",
         "ride_mode_raw": "2",
         "fault_count": "1",
         "gps_satellites": "9",
         "last_location_update": "2024-05-01T12:00:00+00:00",
+        "speed_raw": "0.0",  # REST pcm_vVehicleFilt, raw
     }
     for key, value in expected.items():
         state = hass.states.get(_entity(hass, "sensor", key))
         assert state is not None and state.state == value, key
+    # The REST-only charge-state sensor is gone: its number is an attribute of charge_state.
+    registry = er.async_get(hass)
+    assert registry.async_get_entity_id("sensor", DOMAIN, f"{VEHICLE_ID}_charge_state_raw") is None
+    charge = hass.states.get(_entity(hass, "sensor", "charge_state")).attributes
+    assert (charge["source"], charge["rest_raw"], charge["stream_raw"]) == ("rest", 3, None)
+    for key in ("battery_level", "charge_limit", "odometer", "gps_satellites", "speed_raw"):
+        attrs = hass.states.get(_entity(hass, "sensor", key)).attributes
+        assert attrs["source"] == "rest" and attrs["stream_raw"] is None, key
+    assert hass.states.get(_entity(hass, "sensor", "battery_level")).attributes["rest_raw"] == 87.5
 
     assert (
         hass.states.get(_entity(hass, "sensor", "fault_count")).attributes["fault_level_raw"] == 2
@@ -56,7 +65,7 @@ async def test_enum_sensors_are_plain_integers(
     hass: HomeAssistant, init_integration: MockConfigEntry
 ) -> None:
     registry = er.async_get(hass)
-    for key in ("charge_state_raw", "power_state_raw", "ride_mode_raw", "gps_satellites"):
+    for key in ("speed_raw", "power_state_raw", "ride_mode_raw", "gps_satellites"):
         entry = registry.async_get(_entity(hass, "sensor", key))
         assert entry.entity_category is EntityCategory.DIAGNOSTIC
         attrs = hass.states.get(entry.entity_id).attributes
@@ -65,13 +74,22 @@ async def test_enum_sensors_are_plain_integers(
         assert "unit_of_measurement" not in attrs
 
 
-async def test_real_battery_level_disabled_by_default(
+async def test_real_battery_level_enabled_by_default(
     hass: HomeAssistant, init_integration: MockConfigEntry
 ) -> None:
     entry = er.async_get(hass).async_get(_entity(hass, "sensor", "battery_level_real"))
-    assert entry.disabled_by is er.RegistryEntryDisabler.INTEGRATION
+    assert entry.disabled_by is None
     assert entry.entity_category is EntityCategory.DIAGNOSTIC
-    assert hass.states.get(entry.entity_id) is None
+    state = hass.states.get(entry.entity_id)
+    assert state is not None and state.state == "91.25"
+
+
+async def test_every_entity_is_enabled_by_default(
+    hass: HomeAssistant, init_integration: MockConfigEntry
+) -> None:
+    entries = er.async_entries_for_config_entry(er.async_get(hass), init_integration.entry_id)
+    assert entries
+    assert [e.entity_id for e in entries if e.disabled_by is not None] == []
 
 
 async def test_device_registry(hass: HomeAssistant, init_integration: MockConfigEntry) -> None:
@@ -180,7 +198,7 @@ async def test_dynamic_unknown_key_sensors(
         entity_id = registry.async_get_entity_id("sensor", DOMAIN, uid(key))
         assert entity_id, key
         reg = registry.async_get(entity_id)
-        assert reg.disabled_by is er.RegistryEntryDisabler.INTEGRATION
+        assert reg.disabled_by is None  # enabled by default
         assert reg.entity_category is EntityCategory.DIAGNOSTIC
     # Known-but-unmapped numeric keys are discovered too.
     assert registry.async_get_entity_id("sensor", DOMAIN, uid("hu_NModeSelectorKnob"))
@@ -199,7 +217,7 @@ async def test_dynamic_unknown_key_sensors(
     ):
         assert registry.async_get_entity_id("sensor", DOMAIN, uid(key)) is None, key
     # Keys that have an explicit entity or are positions are never discovered.
-    for key in ("bms_rSOCDisp", "con_aLatitude", "con_zAltitude", "con_tUtc"):
+    for key in ("bms_rSOCDisp", "con_aLatitude", "con_zAltitude", "con_tUtc", "pcm_vVehicleFilt"):
         assert registry.async_get_entity_id("sensor", DOMAIN, uid(key)) is None, key
 
     count = len(registry.entities)

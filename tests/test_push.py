@@ -74,16 +74,6 @@ def _state(hass: HomeAssistant, platform: str, key: str):
     return hass.states.get(_entity(hass, platform, key))
 
 
-async def _enable(hass: HomeAssistant, entry: MockConfigEntry, platform: str, key: str) -> str:
-    """Enable a disabled-by-default entity (reloads the entry, which creates a new stream)."""
-    registry = er.async_get(hass)
-    entity_id = _entity(hass, platform, key)
-    registry.async_update_entity(entity_id, disabled_by=None)
-    await hass.config_entries.async_reload(entry.entry_id)
-    await hass.async_block_till_done()
-    return entity_id
-
-
 # ------------------------------------------------------------------------------ live updates
 async def test_one_stream_per_bike_started_after_first_refresh(
     hass: HomeAssistant, mock_pyalso: PyalsoMocks
@@ -110,6 +100,7 @@ async def test_push_updates_entities_without_rest_poll(
     assert _state(hass, "sensor", "minutes_until_full").state == STATE_UNKNOWN  # nothing yet
     assert _state(hass, "sensor", "battery_health").state == STATE_UNKNOWN
 
+    stream.status(True)  # the real stream reports "connected" before the first message
     stream.emit(battery_event(55, minutes=42, health=97, limit=80))
     stream.emit(location_event())
     stream.emit(odometer_event(123_500))
@@ -125,6 +116,9 @@ async def test_push_updates_entities_without_rest_poll(
     assert float(_state(hass, "sensor", "odometer").state) == pytest.approx(
         123_500 * KM_PER_MILE, rel=1e-4
     )
+    for key in ("battery_level", "charge_limit", "odometer", "gps_satellites"):
+        assert _state(hass, "sensor", key).attributes["source"] == "stream", key
+    assert tracker.attributes["source"] == "stream"
     assert mock_pyalso.client.get_vehicle_state.await_count == polls  # no REST poll happened
 
 
@@ -132,19 +126,28 @@ async def test_minutes_until_full_stays_unknown_when_absent(
     hass: HomeAssistant, init_integration: MockConfigEntry, mock_pyalso: PyalsoMocks
 ) -> None:
     stream = mock_pyalso.streams.latest()
+    stream.status(True)
     # Other packets do not carry the value: it stays unknown, nothing is made up.
     stream.emit(bike_info_event())
     stream.emit(odometer_event(123_500))
-    # An un-stamped battery packet without the field is not read as "zero minutes" either. (It also
-    # has no source time, so its level cannot outrank the timestamped REST value: the REST
-    # reading stays.)
-    stream.emit(battery_event(60, minutes=None, health=None, at=None))
     await hass.async_block_till_done()
-    assert float(_state(hass, "sensor", "battery_level").state) == 87.5
     assert _state(hass, "sensor", "minutes_until_full").state == STATE_UNKNOWN
-    assert _state(hass, "sensor", "battery_health").state == STATE_UNKNOWN
-    # In a stamped packet proto3 omits zero, and pyalso documents that as 0 minutes (full).
-    stream.emit(battery_event(90, minutes=None, health=None, at=BASE_TIME + 100))
+    # A held value ...
+    stream.emit(battery_event(60, minutes=42, at=BASE_TIME + 100))
+    await hass.async_block_till_done()
+    assert _state(hass, "sensor", "minutes_until_full").state == "42"
+    # ... is cleared by a newer stamped packet without the field (observed while CHARGING): the
+    # value is unknown, never 0.
+    stream.emit(battery_event(61, minutes=None, health=None, charge_state=2, at=BASE_TIME + 200))
+    await hass.async_block_till_done()
+    assert _state(hass, "sensor", "minutes_until_full").state == STATE_UNKNOWN
+    assert _state(hass, "sensor", "charge_state").state == "charging"
+    # An un-stamped packet without the field is not read as "zero minutes" either.
+    stream.emit(battery_event(62, minutes=None, health=None, at=None))
+    await hass.async_block_till_done()
+    assert _state(hass, "sensor", "minutes_until_full").state == STATE_UNKNOWN
+    # A real 0 on the wire is still 0.
+    stream.emit(battery_event(90, minutes=0, at=BASE_TIME + 300))
     await hass.async_block_till_done()
     assert _state(hass, "sensor", "minutes_until_full").state == "0"
 
@@ -154,6 +157,7 @@ async def test_push_does_not_reset_the_poll_timer(
 ) -> None:
     coordinator = get_coordinator(init_integration)
     stream = mock_pyalso.streams.latest()
+    stream.status(True)
     with (
         patch.object(coordinator, "async_set_updated_data") as set_data,
         patch.object(coordinator, "_schedule_refresh") as schedule,
@@ -171,34 +175,43 @@ async def test_stale_push_does_not_overwrite_newer_data(
 ) -> None:
     stream = mock_pyalso.streams.latest()
     coordinator = get_coordinator(init_integration)
+    stream.status(True)
     stream.emit(battery_event(40, at=BASE_TIME + 200))
     stream.emit(battery_event(99, at=BASE_TIME + 100))  # a cached snapshot from the cloud
     await hass.async_block_till_done()
-    assert float(_state(hass, "sensor", "battery_level").state) == 40
+    assert (
+        float(_state(hass, "sensor", "battery_level").state) == 40
+    )  # time guard within the stream
 
-    # A REST report that is older than the pushed data does not win either ...
-    await coordinator.async_refresh()
-    await hass.async_block_till_done()
-    assert float(_state(hass, "sensor", "battery_level").state) == 40
-
-    # ... and a newer one does.
+    # While the stream is connected and delivered the value it wins, even over a newer REST report
+    # (stream first) ...
     mock_pyalso.rest_state = lambda vid: make_state(
         vid, {"bms_rSOCDisp": 70.0, "con_tUtc": BASE_TIME + 500}
     )
     await coordinator.async_refresh()
     await hass.async_block_till_done()
-    assert float(_state(hass, "sensor", "battery_level").state) == 70
+    state = _state(hass, "sensor", "battery_level")
+    assert float(state.state) == 40
+    assert (state.attributes["source"], state.attributes["rest_raw"]) == ("stream", 70.0)
+
+    # ... and once it disconnects the REST value is used at once.
+    stream.status(False, "stream_ended")
+    await hass.async_block_till_done()
+    state = _state(hass, "sensor", "battery_level")
+    assert float(state.state) == 70
+    assert (state.attributes["source"], state.attributes["stream_raw"]) == ("rest", 40)
 
 
 async def test_odometer_never_goes_down(
     hass: HomeAssistant, init_integration: MockConfigEntry, mock_pyalso: PyalsoMocks
 ) -> None:
     stream = mock_pyalso.streams.latest()
-    stream.emit(odometer_event(100))  # an old cached value
+    stream.status(True)
+    stream.emit(odometer_event(100))  # an old cached value, lower than the REST odometer
     await hass.async_block_till_done()
-    assert float(_state(hass, "sensor", "odometer").state) == pytest.approx(
-        123_456 * KM_PER_MILE, rel=1e-4
-    )
+    state = _state(hass, "sensor", "odometer")
+    assert float(state.state) == pytest.approx(123_456 * KM_PER_MILE, rel=1e-4)
+    assert (state.attributes["source"], state.attributes["stream_raw"]) == ("rest", 100)
 
 
 # ---------------------------------------------------------------------- connection state
@@ -207,10 +220,10 @@ async def test_push_connected_sensor_follows_the_stream(
 ) -> None:
     registry = er.async_get(hass)
     entry = registry.async_get(_entity(hass, "binary_sensor", "push_connected"))
-    assert entry.disabled_by is er.RegistryEntryDisabler.INTEGRATION
+    assert entry.disabled_by is None  # enabled by default
     assert entry.entity_category is EntityCategory.DIAGNOSTIC
 
-    entity_id = await _enable(hass, init_integration, "binary_sensor", "push_connected")
+    entity_id = entry.entity_id
     stream = mock_pyalso.streams.latest()
     state = hass.states.get(entity_id)
     assert state.state == STATE_OFF
@@ -246,7 +259,7 @@ async def test_keepalive_replies_do_not_count_as_push(
 ) -> None:
     from pyalso import KeepAliveEvent
 
-    entity_id = await _enable(hass, init_integration, "binary_sensor", "push_connected")
+    entity_id = _entity(hass, "binary_sensor", "push_connected")  # enabled by default
     mock_pyalso.streams.latest().emit(
         KeepAliveEvent(feature=0x40, command=1, status=0, timestamp=BASE_TIME, payload=b"")
     )
@@ -409,7 +422,7 @@ async def test_push_connected_sensor_reports_polling_only(
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
-    entity_id = await _enable(hass, entry, "binary_sensor", "push_connected")
+    entity_id = _entity(hass, "binary_sensor", "push_connected")  # enabled by default
     state = hass.states.get(entity_id)
     assert state.state == STATE_OFF
     assert state.attributes["polling_only"] is True
@@ -457,58 +470,89 @@ async def test_old_odometer_unique_id_is_migrated(
     await hass.config_entries.async_unload(entry.entry_id)
 
 
-async def test_charge_state_enum_sensor_follows_the_push_stream(
+async def test_charge_state_is_one_entity_stream_first_with_rest_fallback(
     hass: HomeAssistant, init_integration: MockConfigEntry, mock_pyalso: PyalsoMocks
 ) -> None:
     stream = mock_pyalso.streams.latest()
-    # No push data yet: the enum sensor is unknown (the REST value is NOT used for it) ...
-    assert _state(hass, "sensor", "charge_state").state == STATE_UNKNOWN
-    # ... while the raw REST shadow value is its own diagnostic sensor.
-    shadow = _state(hass, "sensor", "charge_state_raw")
-    assert shadow.state == "3"
-    assert "shadow, raw" in shadow.name.lower()
-    assert (
-        er.async_get(hass).async_get(shadow.entity_id).entity_category is EntityCategory.DIAGNOSTIC
-    )
+    # No push data yet: the REST value (3 = plugged in at the limit) is translated.
+    state = _state(hass, "sensor", "charge_state")
+    assert state.state == "fully_charged"
+    assert (state.attributes["source"], state.attributes["rest_raw"]) == ("rest", 3)
+    # The separate REST sensor no longer exists.
+    registry = er.async_get(hass)
+    assert registry.async_get_entity_id("sensor", DOMAIN, f"{VEHICLE_ID}_charge_state_raw") is None
 
-    # Unplugged and idle: the stream says 1 (not_charging) while the REST shadow still reads 3.
+    # Connected and delivered: the stream's value (1 = not_charging) wins over REST 3.
+    stream.status(True)
     stream.emit(battery_event(charge_state=1, at=BASE_TIME + 100))
     await hass.async_block_till_done()
     state = _state(hass, "sensor", "charge_state")
     assert state.state == "not_charging"
     assert state.attributes["device_class"] == "enum"
     assert state.attributes["options"] == CHARGE_STATE_OPTIONS
-    assert state.attributes["charging_state_raw"] == 1
-    assert _state(hass, "sensor", "charge_state_raw").state == "3"  # untouched by the stream
+    assert state.attributes["source"] == "stream"
+    assert (state.attributes["stream_raw"], state.attributes["rest_raw"]) == (1, 3)
 
-    # Fully charged: both happen to read 3, but they stay independent values.
-    stream.emit(battery_event(charge_state=3, at=BASE_TIME + 200))
+    # Charging (verified 2026-10-30): a named option.
+    stream.emit(battery_event(charge_state=2, at=BASE_TIME + 200))
     await hass.async_block_till_done()
-    assert _state(hass, "sensor", "charge_state").state == "fully_charged"
-    mock_pyalso.rest_state = lambda vid: make_state(
-        vid, {"con_NChargeState": 0, "con_tUtc": BASE_TIME + 50}
-    )
-    await get_coordinator(init_integration).async_refresh()
-    await hass.async_block_till_done()
-    assert _state(hass, "sensor", "charge_state").state == "fully_charged"  # REST never touches it
-    # The REST report is the newest source for ITS key: the pushed value never shadows it.
-    assert _state(hass, "sensor", "charge_state_raw").state == "0"
+    assert _state(hass, "sensor", "charge_state").state == "charging"
 
-
-async def test_charge_state_rest_value_alone_never_drives_the_enum_sensor(
-    hass: HomeAssistant, init_integration: MockConfigEntry, mock_pyalso: PyalsoMocks
-) -> None:
+    # A REST refresh does not override the live stream value ...
     mock_pyalso.rest_state = lambda vid: make_state(
         vid, {"con_NChargeState": 0, "con_tUtc": BASE_TIME + 500}
     )
     await get_coordinator(init_integration).async_refresh()
     await hass.async_block_till_done()
-    assert _state(hass, "sensor", "charge_state_raw").state == "0"
-    assert _state(hass, "sensor", "charge_state").state == STATE_UNKNOWN
+    state = _state(hass, "sensor", "charge_state")
+    assert (state.state, state.attributes["rest_raw"]) == ("charging", 0)
+
+    # ... until the stream disconnects: REST 0 = not charging.
+    stream.status(False, "stream_ended")
+    await hass.async_block_till_done()
+    state = _state(hass, "sensor", "charge_state")
+    assert state.state == "not_charging"
+    assert (state.attributes["source"], state.attributes["stream_raw"]) == ("rest", 2)
+
+
+@pytest.mark.parametrize(("rest", "expected"), [(0, "not_charging"), (2, "charging")])
+async def test_charge_state_falls_back_to_the_mapped_rest_value(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_pyalso: PyalsoMocks,
+    rest: int,
+    expected: str,
+) -> None:
+    mock_pyalso.rest_state = lambda vid: make_state(
+        vid, {"con_NChargeState": rest, "con_tUtc": BASE_TIME + 500}
+    )
+    await get_coordinator(init_integration).async_refresh()
+    await hass.async_block_till_done()
+    state = _state(hass, "sensor", "charge_state")
+    assert state.state == expected
+    assert (state.attributes["source"], state.attributes["rest_raw"]) == ("rest", rest)
+
+
+async def test_an_unmapped_rest_charge_state_is_unknown_never_guessed(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_pyalso: PyalsoMocks
+) -> None:
+    stream = mock_pyalso.streams.latest()
+    stream.status(True)
+    stream.emit(battery_event(charge_state=3, at=BASE_TIME + 100))
+    stream.status(False, "stream_ended")  # stream disconnected: REST decides
+    mock_pyalso.rest_state = lambda vid: make_state(
+        vid, {"con_NChargeState": 5, "con_tUtc": BASE_TIME + 500}
+    )
+    await get_coordinator(init_integration).async_refresh()
+    await hass.async_block_till_done()
+    state = _state(hass, "sensor", "charge_state")
+    assert state.state == STATE_UNKNOWN  # not the stale stream value, not a guess
+    assert (state.attributes["source"], state.attributes["rest_raw"]) == ("rest", 5)
+    assert state.attributes["stream_raw"] == 3
 
 
 @pytest.mark.parametrize(
-    ("number", "expected"), [(2, "unknown_2"), (4, "unknown_4"), (7, "unknown_7")]
+    ("number", "expected"), [(2, "charging"), (4, "unknown_4"), (7, "unknown_7")]
 )
 async def test_unverified_or_new_charge_states_fall_back_to_unknown_n(
     hass: HomeAssistant,
@@ -517,13 +561,16 @@ async def test_unverified_or_new_charge_states_fall_back_to_unknown_n(
     number: int,
     expected: str,
 ) -> None:
-    mock_pyalso.streams.latest().emit(battery_event(charge_state=number, at=BASE_TIME + 300))
+    stream = mock_pyalso.streams.latest()
+    stream.status(True)
+    stream.emit(battery_event(charge_state=number, at=BASE_TIME + 300))
     await hass.async_block_till_done()
     state = _state(hass, "sensor", "charge_state")
     assert state.state == expected  # no exception, no made-up name
     assert expected in state.attributes["options"]
-    assert state.attributes["options"][:2] == ["not_charging", "fully_charged"]
-    assert state.attributes["charging_state_raw"] == number
+    assert state.attributes["options"][:3] == ["not_charging", "charging", "fully_charged"]
+    assert "unknown_2" not in state.attributes["options"]
+    assert (state.attributes["source"], state.attributes["stream_raw"]) == ("stream", number)
 
 
 async def test_device_info_and_firmware_from_the_stream(
@@ -679,6 +726,7 @@ async def test_events_decoded_by_real_pyalso_drive_the_entities(
         + field_varint(9, BASE_TIME + 150)
     )
     stream = mock_pyalso.streams.latest()
+    stream.status(True)
     stream.emit(decode_raw(Packet(0x04, 0x0101, 0xFF, BASE_TIME, field_bytes(1, battery)).encode()))
     stream.emit(decode_raw(Packet(0x77, 0x0105, 0xFF, BASE_TIME, _unknown_payload()).encode()))
     await hass.async_block_till_done()
@@ -686,8 +734,9 @@ async def test_events_decoded_by_real_pyalso_drive_the_entities(
     assert float(_state(hass, "sensor", "charge_limit").state) == 85
     assert _state(hass, "sensor", "minutes_until_full").state == "30"
     assert _state(hass, "sensor", "battery_health").state == "95"
-    assert _state(hass, "sensor", "charge_state").state == "not_charging"
-    assert _state(hass, "sensor", "charge_state_raw").state == "3"  # REST shadow, separate enum
+    charge = _state(hass, "sensor", "charge_state")
+    assert charge.state == "not_charging"
+    assert charge.attributes["rest_raw"] == 3  # REST shadow, separate enum, kept as an attribute
     assert get_coordinator(init_integration).unknown_packet_count == 1
 
 
@@ -822,7 +871,7 @@ async def test_a_failing_rest_poll_is_logged_once_not_per_retry(
 
 
 # ------------------------------------------------------------------ last location update
-async def test_last_location_update_follows_a_pushed_fix(
+async def test_last_location_update_follows_the_source_rule(
     hass: HomeAssistant, init_integration: MockConfigEntry, mock_pyalso: PyalsoMocks
 ) -> None:
     sensor = "last_location_update"
@@ -830,20 +879,38 @@ async def test_last_location_update_follows_a_pushed_fix(
     rest_time = int(datetime(2024, 5, 1, 12, tzinfo=UTC).timestamp())
     stream = mock_pyalso.streams.latest()
 
-    stream.emit(location_event(at=rest_time - 3600))  # an older cached fix
+    # Connected and delivered: the stream's fix time and position, even an older cached fix.
+    stream.status(True)
+    stream.emit(location_event(at=rest_time - 3600))
     await hass.async_block_till_done()
-    assert _state(hass, "sensor", sensor).state == "2024-05-01T12:00:00+00:00"  # never moves back
-
+    older = datetime.fromtimestamp(rest_time - 3600, UTC).isoformat()
+    assert _state(hass, "sensor", sensor).state == older
+    assert _state(hass, "sensor", sensor).attributes["source"] == "stream"
     stream.emit(location_event(at=rest_time + 90))  # a newer live fix
     await hass.async_block_till_done()
     expected = datetime.fromtimestamp(rest_time + 90, UTC).isoformat()
     assert _state(hass, "sensor", sensor).state == expected
-    assert _state(hass, "device_tracker", "location").attributes["latitude"] == 2.2
+    tracker = _state(hass, "device_tracker", "location")
+    assert tracker.attributes["latitude"] == 2.2
+    assert tracker.attributes["source"] == "stream"
 
-    # A later REST poll with an older location timestamp does not pull it back either.
+    # A REST poll does not override it while the stream is connected ...
     await get_coordinator(init_integration).async_refresh()
     await hass.async_block_till_done()
     assert _state(hass, "sensor", sensor).state == expected
+
+    # ... a disconnect switches to the REST time and position.
+    stream.status(False, "stream_ended")
+    await hass.async_block_till_done()
+    assert _state(hass, "sensor", sensor).state == "2024-05-01T12:00:00+00:00"
+    tracker = _state(hass, "device_tracker", "location")
+    assert tracker.attributes["source"] == "rest"
+    assert tracker.attributes["latitude"] != 2.2
+    # While disconnected a pushed fix is kept, but REST is still shown.
+    stream.emit(location_event(at=rest_time + 200))
+    await hass.async_block_till_done()
+    assert _state(hass, "sensor", sensor).state == "2024-05-01T12:00:00+00:00"
+    assert _state(hass, "sensor", sensor).attributes["stream_raw"] == rest_time + 200
 
 
 # ------------------------------------------------------------- logging per bike / failures
@@ -980,7 +1047,27 @@ async def test_diagnostics_show_both_charge_states_side_by_side(
     diag = await async_get_config_entry_diagnostics(hass, init_integration)
     assert diag["push"][0]["charging_state_raw"] is None
     assert diag["push"][0]["shadow_charge_state_raw"] == 3
-    mock_pyalso.streams.latest().emit(battery_event(charge_state=1, at=BASE_TIME + 100))
+    assert diag["push"][0]["stream_connected"] is False
+    sources = diag["push"][0]["sources"]
+    assert set(sources) == {
+        "battery_level",
+        "charge_limit",
+        "odometer",
+        "charge_state",
+        "position",
+        "altitude",
+        "satellite_count",
+        "last_location_update",
+        "speed",
+    }
+    assert set(sources.values()) == {"rest"}
+    stream = mock_pyalso.streams.latest()
+    stream.status(True)
+    stream.emit(battery_event(charge_state=1, at=BASE_TIME + 100))
     diag = await async_get_config_entry_diagnostics(hass, init_integration)
     assert diag["push"][0]["charging_state_raw"] == 1
     assert diag["push"][0]["shadow_charge_state_raw"] == 3
+    assert diag["push"][0]["stream_connected"] is True
+    sources = diag["push"][0]["sources"]
+    assert sources["charge_state"] == sources["battery_level"] == "stream"
+    assert sources["position"] == "rest"  # no fix delivered on this connection

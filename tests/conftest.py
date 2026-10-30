@@ -106,9 +106,9 @@ def mock_pyalso() -> Generator[PyalsoMocks]:
 
     The fake client is a REAL ``pyalso.AlsoClient`` whose three HTTP reads (status shadow,
     location, connectivity) are replaced by ``mocks.rest_state``. ``get_vehicle_state`` (timestamp
-    stamping, merging of earlier pushes) and ``apply_push_update`` are therefore pyalso's own code,
-    not a copy of it; tests that need to drive that code through real HTTP and a real
-    ``AlsoAuth`` live in ``test_contract.py``.
+    stamping, merging of earlier pushes), ``apply_push_update`` and ``set_stream_connected`` are
+    therefore pyalso's own code, not a copy of it; tests that need to drive that code through real
+    HTTP and a real ``AlsoAuth`` live in ``test_contract.py``.
     """
     streams = FakeStreams()
     client = MagicMock()
@@ -136,6 +136,7 @@ def mock_pyalso() -> Generator[PyalsoMocks]:
     real.get_connectivity = _connectivity  # type: ignore[method-assign]
     client.get_vehicle_state = AsyncMock(side_effect=real.get_vehicle_state)
     client.apply_push_update = MagicMock(side_effect=real.apply_push_update)
+    client.set_stream_connected = MagicMock(side_effect=real.set_stream_connected)
     client.real = real
     with (
         patch("custom_components.also.AlsoAuth", mocks.auth_cls),

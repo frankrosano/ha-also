@@ -6,9 +6,12 @@ Two sources feed the same per-bike :class:`~pyalso.VehicleState`:
   decoded event is merged immediately, without a REST call;
 * the REST poll, now the slower companion that also fills in shadow-only fields.
 
-pyalso does the merging: every value carries the time its source produced it and only newer (or
-equal) data replaces it, so a stale cached snapshot from the stream can never overwrite fresher
-REST data, and a REST refresh never throws away newer pushed data.
+pyalso does the merging. The stream and REST keep their values apart; for a value both report,
+pyalso uses the stream's while the stream is connected and has delivered it on the current
+connection, otherwise the REST value. The coordinator therefore tells pyalso about every
+connection change (:meth:`AlsoCoordinator._async_set_stream_connected`). Within one source every
+value carries the time it was produced and only newer (or equal) data replaces it, and a REST
+refresh never throws away pushed data.
 
 If the stream cannot be used (``grpcio`` missing, repeated failures) the integration keeps working
 on polling alone and logs ONE warning per outage (per bike), not one per retry.
@@ -262,9 +265,9 @@ class AlsoCoordinator(DataUpdateCoordinator[dict[str, VehicleState]]):
             raise UpdateFailed(str(err), retry_after=err.retry_after) from err
         except (AlsoConnectionError, AlsoApiError) as err:
             raise UpdateFailed(f"Error communicating with ALSO: {err}") from err
-        # Each state was captured when ITS REST calls finished. A push that arrived since (while
-        # another bike's calls were still in flight) lives in ``self.data``: fold it back in, newest
-        # source time wins, so assigning the result cannot throw a newer pushed value away.
+        # Each state was captured when ITS REST calls finished. A push (or a connection change)
+        # that arrived since (while another bike's calls were still in flight) lives in
+        # ``self.data``: fold it back in, so assigning the result cannot throw it away.
         previous = self.data or {}
         data: dict[str, VehicleState] = {}
         for state in fetched:
@@ -338,11 +341,25 @@ class AlsoCoordinator(DataUpdateCoordinator[dict[str, VehicleState]]):
             self.async_update_listeners()  # the "last push" attribute moved
 
     @callback
+    def _async_set_stream_connected(self, vehicle_id: str, connected: bool) -> bool:
+        """Tell pyalso whether this bike's stream is connected (it decides the value sources).
+
+        Returns whether the bike's state changed. Entities are not notified here; the callers do.
+        """
+        state = self.client.set_stream_connected(vehicle_id, connected)
+        current = (self.data or {}).get(vehicle_id)
+        if current is None or state is current:
+            return False
+        self.data = {**self.data, vehicle_id: state}
+        return True
+
+    @callback
     def _on_connection(self, vehicle_id: str, status: ConnectionStatus) -> None:
         """Handle a connection change reported by one stream."""
         push_status = self.push_status(vehicle_id)
         push_status.connected = status.connected
         push_status.reason = status.reason
+        self._async_set_stream_connected(vehicle_id, status.connected)
         if status.connected:
             push_status.failures = 0
             push_status.unavailable = False
@@ -455,7 +472,8 @@ class AlsoCoordinator(DataUpdateCoordinator[dict[str, VehicleState]]):
             status.connected = False
             if not keep_reason:
                 status.reason = "stopped"
-        if keep_reason:
+        changed = self._async_set_stream_connected(vehicle_id, False)  # REST values from now on
+        if keep_reason or changed:
             self.async_update_listeners()  # a fatal stop changes what entities and diagnostics show
 
     async def _async_disable_push(self, why: str) -> None:

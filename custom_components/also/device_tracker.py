@@ -54,8 +54,14 @@ class AlsoTracker(AlsoEntity, TrackerEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
         state = self.vehicle_state
-        if state is None or state.altitude_raw is None:
+        if state is None:
             return None
+        # Which source the position came from (stream while connected and delivered, else REST).
+        # The raw coordinates of both sources are deliberately NOT attributes: attributes are
+        # recorded in history, and position data stays limited to latitude/longitude.
+        attrs: dict[str, Any] = {"source": state.position_merged.source}
         # The altitude unit is NOT verified (probably millimetres, an inference), so it is passed
         # on exactly as reported.
-        return {"altitude_raw": state.altitude_raw}
+        if state.altitude_raw is not None:
+            attrs["altitude_raw"] = state.altitude_raw
+        return attrs

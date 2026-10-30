@@ -19,7 +19,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.typing import StateType
-from pyalso import BatteryChargingState, VehicleState
+from pyalso import BatteryChargingState, MergedValue, VehicleState
 
 from .const import (
     EXPLICIT_PUSH_KEYS,
@@ -42,25 +42,26 @@ class AlsoSensorEntityDescription(SensorEntityDescription):
     attrs_fn: Callable[[VehicleState], dict[str, Any]] | None = None
 
 
-#: Charge-state options known up front: the two values verified by observation, plus the schema's
-#: other numbers (0 unspecified, 2 CHARGING, 4 CHARGING_ISSUE) under NEUTRAL names, because their
-#: meaning has never been observed (see :func:`charge_state_option`).
+#: Charge-state options known up front: the three values verified by observation, plus the schema's
+#: other numbers (0 unspecified, 4 CHARGING_ISSUE) under NEUTRAL names, because their meaning has
+#: never been observed (see :func:`charge_state_option`).
 #:
 #: A number outside this list (a value a future firmware sends) is exposed as ``unknown_<n>`` and
 #: appended to the entity's options while it is the current state: the entity's option list
 #: therefore grows by that value and shrinks again when the state moves on, and the value has no
 #: translation (the UI shows the raw ``unknown_<n>``). Recorded history may mention such a state
 #: that the current option list no longer lists.
-CHARGE_STATE_OPTIONS = ["not_charging", "fully_charged", "unknown_0", "unknown_2", "unknown_4"]
+CHARGE_STATE_OPTIONS = ["not_charging", "charging", "fully_charged", "unknown_0", "unknown_4"]
 
 
 def charge_state_option(state: VehicleState) -> str | None:
-    """The stream's charging state as an enum-sensor option, ``None`` before any push data.
+    """The merged charging state as an enum-sensor option, ``None`` when it is unknown.
 
-    Only the values verified by observation get a name (1 = not_charging, 3 = fully_charged). Every
-    other number, including the schema's CHARGING (2) and CHARGING_ISSUE (4), is ``unknown_<n>``
-    until it has been observed. The REST shadow's ``con_NChargeState`` uses a DIFFERENT numbering
-    and is never used here.
+    pyalso merges the stream's ``charging_state`` with the REST ``con_NChargeState`` (stream first;
+    the REST fallback translates only its observed numbers 0/2/3 into the stream's numbering, any
+    other REST number is unknown). Only the values verified by observation get a name
+    (1 = not_charging, 2 = charging, 3 = fully_charged). Every other stream number, including the
+    schema's CHARGING_ISSUE (4), is ``unknown_<n>`` until it has been observed.
     """
     charging = state.charging_state
     if charging is None:
@@ -70,6 +71,14 @@ def charge_state_option(state: VehicleState) -> str | None:
     return f"unknown_{int(charging)}"
 
 
+def _source_attrs(merged: MergedValue[Any]) -> dict[str, Any]:
+    """Attributes of a merged (stream + REST) entity: the source used and both raw values."""
+    return {"source": merged.source, "stream_raw": merged.stream_raw, "rest_raw": merged.rest_raw}
+
+
+# Entities whose value both the stream and REST report are ONE entity each: pyalso uses the stream
+# value while the stream is connected and delivered it, else the REST value. Their ``source``,
+# ``stream_raw`` and ``rest_raw`` attributes show which one is shown and both raw values.
 SENSORS: tuple[AlsoSensorEntityDescription, ...] = (
     AlsoSensorEntityDescription(
         key="battery_level",
@@ -78,6 +87,7 @@ SENSORS: tuple[AlsoSensorEntityDescription, ...] = (
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda s: s.battery_level,
+        attrs_fn=lambda s: _source_attrs(s.battery_level_merged),
     ),
     AlsoSensorEntityDescription(
         key="charge_limit",
@@ -85,6 +95,7 @@ SENSORS: tuple[AlsoSensorEntityDescription, ...] = (
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda s: s.charge_limit,
+        attrs_fn=lambda s: _source_attrs(s.charge_limit_merged),
     ),
     AlsoSensorEntityDescription(
         key="battery_level_real",
@@ -92,7 +103,6 @@ SENSORS: tuple[AlsoSensorEntityDescription, ...] = (
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
-        entity_registry_enabled_default=False,
         value_fn=lambda s: s.battery_level_real,
     ),
     # Verified: the REST odometer equals the stream's value, which is in miles. Home Assistant
@@ -104,8 +114,10 @@ SENSORS: tuple[AlsoSensorEntityDescription, ...] = (
         native_unit_of_measurement=UnitOfLength.MILES,
         state_class=SensorStateClass.TOTAL_INCREASING,
         value_fn=lambda s: s.odometer_miles,
+        attrs_fn=lambda s: _source_attrs(s.odometer_merged),
     ),
-    # Delivered by the push stream only: ``None`` until the first battery packet arrives.
+    # Delivered by the push stream only: unknown until the first battery packet arrives, and
+    # unknown (not 0) whenever the stream leaves the value out.
     AlsoSensorEntityDescription(
         key="minutes_until_full",
         translation_key="minutes_until_full",
@@ -128,29 +140,22 @@ SENSORS: tuple[AlsoSensorEntityDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda s: s.firmware_version,
     ),
-    # Charge state from the PUSH stream (``BatteryState.charging_state``). Unknown until the stream
-    # delivered a battery packet. Unverified numbers are ``unknown_<n>``, never guessed.
+    # Charge state: the stream's ``charging_state`` merged with the REST ``con_NChargeState``
+    # (different numbering; only the observed REST values 0/2/3 are translated). Unverified
+    # numbers are ``unknown_<n>``, never guessed; ``rest_raw`` keeps the REST number.
     AlsoSensorEntityDescription(
         key="charge_state",
         translation_key="charge_state",
         device_class=SensorDeviceClass.ENUM,
         options=CHARGE_STATE_OPTIONS,
         value_fn=charge_state_option,
-        attrs_fn=lambda s: {"charging_state_raw": s.battery_charging_state_raw},
-    ),
-    # The REST shadow's ``con_NChargeState``: a different enum from the stream's charging state
-    # (unplugged and idle read 0 here but 1 = not_charging there), so only the raw number is shown.
-    AlsoSensorEntityDescription(
-        key="charge_state_raw",
-        translation_key="charge_state_raw",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda s: s.charge_state_raw,
+        attrs_fn=lambda s: _source_attrs(s.charging_state_merged),
     ),
     # NOTE: the shadow's ``con_NBikePowerState`` and ``hu_NRideModeREQ`` (read here) are NOT the
     # stream's ``power_state_raw`` / ``ride_mode_raw`` (which pyalso keeps in ``state.push`` and
-    # which come from different enums with their own, unobserved numbering). The same goes for the
-    # two charge states above. These entities read the SHADOW values only; the stream's are
-    # offered by the disabled-by-default ``push_*`` diagnostic sensors, named "(stream)".
+    # which come from different enums with their own, unobserved numbering), so they are NOT
+    # merged. These entities read the SHADOW values only; the stream's are offered by the
+    # auto-discovered ``push_*`` diagnostic sensors, named "(stream)".
     AlsoSensorEntityDescription(
         key="power_state_raw",
         translation_key="power_state_raw",
@@ -176,6 +181,7 @@ SENSORS: tuple[AlsoSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda s: s.satellite_count,
+        attrs_fn=lambda s: _source_attrs(s.satellite_count_merged),
     ),
     AlsoSensorEntityDescription(
         key="last_location_update",
@@ -183,6 +189,17 @@ SENSORS: tuple[AlsoSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.TIMESTAMP,
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda s: s.last_updated,
+        attrs_fn=lambda s: _source_attrs(s.last_updated_merged),
+    ),
+    # Speed: the stream's GPS velocity merged with the REST ``pcm_vVehicleFilt``. Never observed
+    # while moving, so the unit is unverified: shown raw, without a unit or device class.
+    AlsoSensorEntityDescription(
+        key="speed_raw",
+        translation_key="speed_raw",
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda s: s.speed_raw,
+        attrs_fn=lambda s: _source_attrs(s.speed_merged),
     ),
 )
 
@@ -216,7 +233,7 @@ def discoverable_push_keys(state: VehicleState) -> set[str]:
     The same rules as :func:`discoverable_shadow_keys`: numeric and boolean scalars only (serial
     numbers, firmware and model strings are skipped), nothing that already has an entity, and
     nothing that looks like position data. Units of these values are mostly unverified, so they
-    are exposed raw, disabled by default, in their own unique-id namespace.
+    are exposed raw in their own unique-id namespace.
     """
     keys: set[str] = set()
     for key, value in state.push.items():
@@ -250,11 +267,14 @@ async def async_setup_entry(
                     )
                     for desc in SENSORS
                 )
-                # Bring back discovered sensors whose key is temporarily missing from the shadow.
+                # Bring back discovered sensors whose key is temporarily missing from the shadow
+                # (never one for a key that now has an explicit, merged entity).
                 prefix = f"{vid}_{SHADOW_UNIQUE_ID_INFIX}"
                 for reg in er.async_entries_for_config_entry(registry, entry.entry_id):
                     if reg.domain == "sensor" and reg.unique_id.startswith(prefix):
                         key = reg.unique_id.removeprefix(prefix)
+                        if key in EXPLICIT_SHADOW_KEYS:
+                            continue
                         if (vid, key) not in created_shadow:
                             created_shadow.add((vid, key))
                             entities.append(AlsoShadowSensor(coordinator, vid, key))
@@ -262,6 +282,8 @@ async def async_setup_entry(
                 for reg in er.async_entries_for_config_entry(registry, entry.entry_id):
                     if reg.domain == "sensor" and reg.unique_id.startswith(push_prefix):
                         key = reg.unique_id.removeprefix(push_prefix)
+                        if key in EXPLICIT_PUSH_KEYS:
+                            continue
                         if (vid, key) not in created_push:
                             created_push.add((vid, key))
                             entities.append(AlsoPushSensor(coordinator, vid, key))
@@ -319,10 +341,9 @@ class AlsoChargeStateSensor(AlsoSensor):
 
 
 class AlsoShadowSensor(AlsoEntity, SensorEntity):
-    """Auto-discovered raw shadow value: disabled by default, no unit, no device class."""
+    """Auto-discovered raw shadow value: diagnostic, no unit, no device class."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator: AlsoCoordinator, vehicle_id: str, shadow_key: str) -> None:
         super().__init__(coordinator, vehicle_id, f"{SHADOW_UNIQUE_ID_INFIX}{shadow_key}")
@@ -341,12 +362,11 @@ class AlsoShadowSensor(AlsoEntity, SensorEntity):
 class AlsoPushSensor(AlsoEntity, SensorEntity):
     """Auto-discovered raw value that only the live stream delivers (``state.push``).
 
-    Disabled by default, no unit, no device class: most of these units are unverified. The name
-    says "(stream)" so it is never mistaken for the shadow value of a similarly named key.
+    Diagnostic, no unit, no device class: most of these units are unverified. The name says
+    "(stream)" so it is never mistaken for the shadow value of a similarly named key.
     """
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator: AlsoCoordinator, vehicle_id: str, push_key: str) -> None:
         super().__init__(coordinator, vehicle_id, f"{PUSH_UNIQUE_ID_INFIX}{push_key}")

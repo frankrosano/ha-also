@@ -78,14 +78,11 @@
         "name": "Charge state",
         "state": {
           "not_charging": "Not charging",
+          "charging": "Charging",
           "fully_charged": "Fully charged",
           "unknown_0": "Unknown (0)",
-          "unknown_2": "Unknown (2)",
           "unknown_4": "Unknown (4)"
         }
-      },
-      "charge_state_raw": {
-        "name": "Charge state (shadow, raw)"
       },
       "power_state_raw": {
         "name": "Power state (raw)"
@@ -101,6 +98,9 @@
       },
       "last_location_update": {
         "name": "Last location update"
+      },
+      "speed_raw": {
+        "name": "Speed (raw)"
       }
     },
     "binary_sensor": {

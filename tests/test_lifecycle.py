@@ -196,6 +196,7 @@ async def test_a_push_during_a_multi_bike_poll_is_not_replaced_by_the_older_rest
     poll = asyncio.create_task(coordinator.async_refresh())
     await asyncio.wait_for(reached.wait(), 5)
     await asyncio.sleep(0.05)  # bike one's REST result is in, bike two's is still pending
+    mock_pyalso.streams.latest(VEHICLE_ID).status(True)
     mock_pyalso.streams.latest(VEHICLE_ID).emit(battery_event(23, at=BASE_TIME + 300))
     assert float(hass.states.get(level).state) == 23
     release.set()
