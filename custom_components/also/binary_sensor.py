@@ -48,7 +48,14 @@ class AlsoConnectedSensor(AlsoEntity, BinarySensorEntity):
         state = self.vehicle_state
         if state is None or state.connectivity is None:
             return None
-        return {"disconnect_reason": state.connectivity.disconnect_reason}
+        # ``disconnect_reason`` is the server's raw string (seen: NONE, MQTT_KEEP_ALIVE_TIMEOUT in
+        # deep sleep, CLIENT_INITIATED_DISCONNECT on a restart). The connectivity ``timestamp``
+        # moves only when the connection state changes, so it is the time of the last change.
+        changed = state.connectivity.timestamp
+        return {
+            "disconnect_reason": state.connectivity.disconnect_reason,
+            "changed_at": changed.isoformat() if changed else None,
+        }
 
 
 class AlsoPushConnectedSensor(AlsoEntity, BinarySensorEntity):

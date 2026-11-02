@@ -23,7 +23,13 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.also.const import DOMAIN
 from custom_components.also.diagnostics import async_get_config_entry_diagnostics
-from custom_components.also.sensor import CHARGE_STATE_OPTIONS
+from custom_components.also.sensor import (
+    BMS_STATE_OPTIONS,
+    CHARGE_STATE_OPTIONS,
+    KNOB_POSITION_OPTIONS,
+    POWER_STATE_OPTIONS,
+    RIDE_MODE_OPTIONS,
+)
 from custom_components.also.unknown_packets import redact_payload_hex
 
 from .common import BASE_TIME, VEHICLE_ID, make_entry, make_state, unknown_packet
@@ -250,10 +256,11 @@ async def test_stream_only_values_become_enabled_diagnostic_sensors(
     ):
         assert registry.async_get_entity_id("sensor", DOMAIN, uid(key)) is None, key
     # The stream's power/ride enums are different from the shadow's: separate entities.
-    shadow_power = registry.async_get_entity_id("sensor", DOMAIN, f"{VEHICLE_ID}_power_state_raw")
+    shadow_power = registry.async_get_entity_id("sensor", DOMAIN, f"{VEHICLE_ID}_power_state")
     stream_power = registry.async_get_entity_id("sensor", DOMAIN, uid("power_state_raw"))
     assert shadow_power and stream_power and shadow_power != stream_power
-    assert hass.states.get(shadow_power).state == "1"  # the REST shadow value, untouched
+    assert hass.states.get(shadow_power).state == "unknown_1"  # the REST shadow value, untouched
+    assert hass.states.get(shadow_power).attributes["rest_raw"] == 1
 
 
 async def test_enabled_stream_sensor_shows_the_raw_value_and_ids_do_not_collide(
@@ -299,7 +306,17 @@ def test_every_charge_state_option_is_translated_and_both_string_files_agree() -
     assert "unknown_2" not in labels
     assert labels["unknown_4"] == "Unknown (4)"  # neutral: the meaning was never observed
     sensors = strings["entity"]["sensor"]
-    assert "charge_state_raw" not in sensors  # removed entity
-    assert sensors["speed_raw"]["name"] == "Speed (raw)"
+    for key, options in (
+        ("ride_mode", RIDE_MODE_OPTIONS),
+        ("power_state", POWER_STATE_OPTIONS),
+        ("knob_position", KNOB_POSITION_OPTIONS),
+        ("bms_state", BMS_STATE_OPTIONS),
+    ):
+        assert set(options) <= set(sensors[key]["state"]), key
+    assert sensors["power_state"]["state"]["awake_battery_off"] == "Awake (main battery off)"
+    assert sensors["knob_position"]["name"] == "Display knob"
+    for removed in ("charge_state_raw", "speed_raw", "ride_mode_raw", "power_state_raw"):
+        assert removed not in sensors, removed  # removed or replaced entities
+    assert sensors["speed"]["name"] == "Speed"
     assert "token_store_failed" in strings["issues"]
     assert WIRE_LEN == 2  # (the public re-export used by the diagnostics code)

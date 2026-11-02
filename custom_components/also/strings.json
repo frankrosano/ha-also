@@ -84,11 +84,42 @@
           "unknown_4": "Unknown (4)"
         }
       },
-      "power_state_raw": {
-        "name": "Power state (raw)"
+      "ride_mode": {
+        "name": "Ride mode",
+        "state": {
+          "sport": "Sport",
+          "sport_manual": "Sport manual",
+          "trail_manual": "Trail manual",
+          "all_purpose": "All purpose",
+          "conserve": "Conserve",
+          "trail_cadence": "Trail cadence",
+          "custom": "Custom",
+          "all_purpose_manual": "All purpose manual"
+        }
       },
-      "ride_mode_raw": {
-        "name": "Ride mode (raw)"
+      "power_state": {
+        "name": "Power state",
+        "state": {
+          "asleep": "Asleep",
+          "awake_battery_off": "Awake (main battery off)",
+          "battery_on": "Main battery on"
+        }
+      },
+      "knob_position": {
+        "name": "Display knob",
+        "state": {
+          "display_off": "Display off",
+          "locked": "Locked (display on)",
+          "ready": "Ready",
+          "ride": "Ride"
+        }
+      },
+      "bms_state": {
+        "name": "BMS state",
+        "state": {
+          "standby": "Standby",
+          "active": "Active"
+        }
       },
       "fault_count": {
         "name": "Active faults"
@@ -99,8 +130,8 @@
       "last_location_update": {
         "name": "Last location update"
       },
-      "speed_raw": {
-        "name": "Speed (raw)"
+      "speed": {
+        "name": "Speed"
       }
     },
     "binary_sensor": {

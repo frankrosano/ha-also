@@ -14,12 +14,26 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfLength, UnitOfTime
+from homeassistant.const import (
+    PERCENTAGE,
+    EntityCategory,
+    UnitOfLength,
+    UnitOfSpeed,
+    UnitOfTime,
+)
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.typing import StateType
-from pyalso import BatteryChargingState, MergedValue, VehicleState
+from pyalso import (
+    BatteryChargingState,
+    BmsState,
+    KnobPosition,
+    MergedValue,
+    PowerState,
+    RideMode,
+    VehicleState,
+)
 
 from .const import (
     EXPLICIT_PUSH_KEYS,
@@ -46,8 +60,9 @@ class AlsoSensorEntityDescription(SensorEntityDescription):
 #: other numbers (0 unspecified, 4 CHARGING_ISSUE) under NEUTRAL names, because their meaning has
 #: never been observed (see :func:`charge_state_option`).
 #:
-#: A number outside this list (a value a future firmware sends) is exposed as ``unknown_<n>`` and
-#: appended to the entity's options while it is the current state: the entity's option list
+#: For every enum sensor (see :class:`AlsoEnumSensor`), a number outside its option list (a value a
+#: future firmware sends, or one whose meaning is not established) is exposed as ``unknown_<n>``
+#: and appended to the entity's options while it is the current state: the entity's option list
 #: therefore grows by that value and shrinks again when the state moves on, and the value has no
 #: translation (the UI shows the raw ``unknown_<n>``). Recorded history may mention such a state
 #: that the current option list no longer lists.
@@ -69,6 +84,90 @@ def charge_state_option(state: VehicleState) -> str | None:
     if isinstance(charging, BatteryChargingState) and charging.verified:
         return charging.name.lower()
     return f"unknown_{int(charging)}"
+
+
+# REST shadow enums with named states. Only the named numbers get an option; every other number
+# (ride mode 0 = none selected, power states 0/1/5/6/7, bms 5, ...) is ``unknown_<n>``.
+#: Ride mode (``hu_NRideModeREQ``): the app's RideMode names for every number except 0. Sport and
+#: All Purpose are confirmed on-bike and All Purpose Manual was observed; the others are app names
+#: the bike does not offer yet.
+RIDE_MODE_NAMES: dict[int, str] = {
+    mode: mode.name.lower() for mode in RideMode if mode is not RideMode.UNSPECIFIED
+}
+#: Power state (``con_NBikePowerState``): the three values verified by observation.
+POWER_STATE_NAMES: dict[int, str] = {
+    PowerState.TWELVEVOLTLOW: "asleep",
+    PowerState.TWELVEVOLTHIGH: "awake_battery_off",
+    PowerState.VBATTENABLED: "battery_on",
+}
+#: Display knob (``hu_NModeSelectorKnob``): the rotating display; every position was verified.
+KNOB_POSITION_NAMES: dict[int, str] = {
+    KnobPosition.DISPLAY_OFF: "display_off",
+    KnobPosition.LOCKED: "locked",
+    KnobPosition.READY: "ready",
+    KnobPosition.RIDE: "ride",
+}
+#: BMS state (``bms_NState``): standby and active were verified; 5 (seen once) stays unknown.
+BMS_STATE_NAMES: dict[int, str] = {BmsState.STANDBY: "standby", BmsState.ACTIVE: "active"}
+
+RIDE_MODE_OPTIONS = list(RIDE_MODE_NAMES.values())
+POWER_STATE_OPTIONS = list(POWER_STATE_NAMES.values())
+KNOB_POSITION_OPTIONS = list(KNOB_POSITION_NAMES.values())
+BMS_STATE_OPTIONS = list(BMS_STATE_NAMES.values())
+
+
+def _named_option(value: int | None, names: dict[int, str]) -> str | None:
+    """The option name of ``value``; ``unknown_<n>`` for an unnamed number, ``None`` if absent."""
+    if value is None:
+        return None
+    return names.get(int(value), f"unknown_{int(value)}")
+
+
+def ride_mode_option(state: VehicleState) -> str | None:
+    """The REST ride mode as an enum-sensor option."""
+    return _named_option(state.ride_mode, RIDE_MODE_NAMES)
+
+
+def power_state_option(state: VehicleState) -> str | None:
+    """The REST power state as an enum-sensor option."""
+    return _named_option(state.power_state, POWER_STATE_NAMES)
+
+
+def knob_position_option(state: VehicleState) -> str | None:
+    """The REST display knob position as an enum-sensor option."""
+    return _named_option(state.knob_position, KNOB_POSITION_NAMES)
+
+
+def bms_state_option(state: VehicleState) -> str | None:
+    """The REST BMS state as an enum-sensor option."""
+    return _named_option(state.bms_state, BMS_STATE_NAMES)
+
+
+def _rest_raw(value: int | None) -> dict[str, Any]:
+    """The REST shadow's raw number of an enum sensor (these read the shadow only)."""
+    return {"rest_raw": None if value is None else int(value)}
+
+
+def _power_state_attrs(state: VehicleState) -> dict[str, Any]:
+    """Raw number plus the app's PowerState name (``candidate_name``; may be unverified)."""
+    power = state.power_state
+    return {
+        **_rest_raw(power),
+        "candidate_name": power.name if isinstance(power, PowerState) else None,
+    }
+
+
+def _fault_attrs(state: VehicleState) -> dict[str, Any]:
+    """Fault level plus the active fault codes, each mapped to the ISO time it was set."""
+    codes = state.fault_codes
+    return {
+        "fault_level_raw": state.fault_level_raw,
+        "fault_codes": (
+            None
+            if codes is None
+            else {code: when.isoformat() if when else None for code, when in codes.items()}
+        ),
+    }
 
 
 def _source_attrs(merged: MergedValue[Any]) -> dict[str, Any]:
@@ -157,23 +256,46 @@ SENSORS: tuple[AlsoSensorEntityDescription, ...] = (
     # merged. These entities read the SHADOW values only; the stream's are offered by the
     # auto-discovered ``push_*`` diagnostic sensors, named "(stream)".
     AlsoSensorEntityDescription(
-        key="power_state_raw",
-        translation_key="power_state_raw",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda s: s.power_state_raw,
+        key="ride_mode",
+        translation_key="ride_mode",
+        device_class=SensorDeviceClass.ENUM,
+        options=RIDE_MODE_OPTIONS,
+        value_fn=ride_mode_option,
+        attrs_fn=lambda s: _rest_raw(s.ride_mode),
     ),
     AlsoSensorEntityDescription(
-        key="ride_mode_raw",
-        translation_key="ride_mode_raw",
+        key="power_state",
+        translation_key="power_state",
+        device_class=SensorDeviceClass.ENUM,
+        options=POWER_STATE_OPTIONS,
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda s: s.ride_mode_raw,
+        value_fn=power_state_option,
+        attrs_fn=_power_state_attrs,
+    ),
+    AlsoSensorEntityDescription(
+        key="knob_position",
+        translation_key="knob_position",
+        device_class=SensorDeviceClass.ENUM,
+        options=KNOB_POSITION_OPTIONS,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=knob_position_option,
+        attrs_fn=lambda s: _rest_raw(s.knob_position),
+    ),
+    AlsoSensorEntityDescription(
+        key="bms_state",
+        translation_key="bms_state",
+        device_class=SensorDeviceClass.ENUM,
+        options=BMS_STATE_OPTIONS,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=bms_state_option,
+        attrs_fn=lambda s: _rest_raw(s.bms_state),
     ),
     AlsoSensorEntityDescription(
         key="fault_count",
         translation_key="fault_count",
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda s: s.fault_count,
-        attrs_fn=lambda s: {"fault_level_raw": s.fault_level_raw},
+        attrs_fn=_fault_attrs,
     ),
     AlsoSensorEntityDescription(
         key="gps_satellites",
@@ -191,14 +313,16 @@ SENSORS: tuple[AlsoSensorEntityDescription, ...] = (
         value_fn=lambda s: s.last_updated,
         attrs_fn=lambda s: _source_attrs(s.last_updated_merged),
     ),
-    # Speed: the stream's GPS velocity merged with the REST ``pcm_vVehicleFilt``. Never observed
-    # while moving, so the unit is unverified: shown raw, without a unit or device class.
+    # Speed: the stream's GPS velocity merged with the REST ``pcm_vVehicleFilt``. Both are mph,
+    # verified against the display on a ride; Home Assistant converts it for display. A stopped
+    # bike's stream fix omits the velocity, which pyalso reads as 0.0.
     AlsoSensorEntityDescription(
-        key="speed_raw",
-        translation_key="speed_raw",
+        key="speed",
+        translation_key="speed",
+        device_class=SensorDeviceClass.SPEED,
+        native_unit_of_measurement=UnitOfSpeed.MILES_PER_HOUR,
         state_class=SensorStateClass.MEASUREMENT,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda s: s.speed_raw,
+        value_fn=lambda s: s.speed_mph,
         attrs_fn=lambda s: _source_attrs(s.speed_merged),
     ),
 )
@@ -262,7 +386,7 @@ async def async_setup_entry(
             if vid not in known_vehicles:
                 known_vehicles.add(vid)
                 entities.extend(
-                    (AlsoChargeStateSensor if desc.key == "charge_state" else AlsoSensor)(
+                    (AlsoEnumSensor if desc.device_class is SensorDeviceClass.ENUM else AlsoSensor)(
                         coordinator, vid, desc
                     )
                     for desc in SENSORS
@@ -328,12 +452,16 @@ class AlsoSensor(AlsoEntity, SensorEntity):
         return attrs_fn(state) if state and attrs_fn else None
 
 
-class AlsoChargeStateSensor(AlsoSensor):
-    """Enum sensor whose options grow by an ``unknown_<n>`` value when the stream sends one."""
+class AlsoEnumSensor(AlsoSensor):
+    """Enum sensor whose options grow by the current ``unknown_<n>`` value.
+
+    The description's options are the named states; a number without a name is shown as
+    ``unknown_<n>`` and listed in the options only while it is the state.
+    """
 
     @property
     def options(self) -> list[str]:
-        options = list(CHARGE_STATE_OPTIONS)
+        options = list(self.entity_description.options or [])
         value = self.native_value
         if isinstance(value, str) and value not in options:
             options.append(value)

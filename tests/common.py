@@ -114,7 +114,11 @@ def make_state(
             }
         ),
         connectivity=Connectivity.from_dict(
-            {"connected": connected, "disconnect_reason": "TEST_REASON"}
+            {
+                "connected": connected,
+                "disconnect_reason": "TEST_REASON",
+                "timestamp": "2024-05-01T11:00:00Z",
+            }
         ),
     )
 
@@ -185,7 +189,11 @@ def battery_event(
 
 
 def location_event(
-    lat_nano: int = 2_200_000_000, lon_nano: int = -3_300_000_000, *, at: int = BASE_TIME + 100
+    lat_nano: int = 2_200_000_000,
+    lon_nano: int = -3_300_000_000,
+    *,
+    at: int = BASE_TIME + 100,
+    velocity: float | None = 3.5,
 ) -> BikeLocationEvent:
     location = BikeLocation(
         last_updated=at,
@@ -193,7 +201,7 @@ def location_event(
         longitude_nano=lon_nano,
         altitude_raw=5000,
         azimuth_raw=90,
-        velocity_raw=3.5,
+        velocity_raw=velocity,
         gps_accuracy_raw=4,
         satellite_count=11,
         gps_time=at,

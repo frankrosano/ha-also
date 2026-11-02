@@ -48,25 +48,40 @@ A value that both the push connection and the REST data report is **one** entity
 | Charge state | Enum sensor, merged: `not_charging`, `charging` or `fully_charged` (the three values checked against the real bike). The REST number uses a different numbering; only its observed values (0 = not charging, 2 = charging, 3 = fully charged) are translated, any other REST number is unknown. Any other push number shows as `unknown_<n>` ("Unknown (n)"; `unknown_0` and `unknown_4` are the schema's other numbers and are always listed, any further number appears in the option list only while it is the current state and is not translated) |
 | Battery health | %, from the push connection (unit assumed, see below). Diagnostic |
 | Firmware version | Text, from the push connection. Diagnostic. The bike's model name and firmware also appear on the device page |
-| Power state / Ride mode (raw) | Diagnostic, plain integers from the REST shadow (`con_NBikePowerState`, `hu_NRideModeREQ`). The push connection has values with the same-looking names, but they come from different enums, so they are not merged; they are only available as the auto-discovered "(stream)" sensors below |
-| Active faults | Count; the attribute `fault_level_raw` holds the raw level |
+| Ride mode | Enum sensor from the REST shadow (`hu_NRideModeREQ`), named like the app's ride modes: `sport`, `sport_manual`, `trail_manual`, `all_purpose`, `conserve`, `trail_cadence`, `custom`, `all_purpose_manual`. Sport and All purpose are confirmed on the bike and All purpose manual was observed; the others are the app's names for modes the bike does not offer yet. 0 (none selected, while asleep or parked) and any other number show as `unknown_<n>`. Attribute `rest_raw` (the number) |
+| Power state | Diagnostic enum sensor from the REST shadow (`con_NBikePowerState`): `asleep` (3), `awake_battery_off` ("Awake (main battery off)", 2: woken but locked, or at power-off) and `battery_on` ("Main battery on", 4: unlocked/ready, riding or charging). Other numbers show as `unknown_<n>`. Attributes `rest_raw` and `candidate_name` (the app's name for the number, for example `OFF` for 1; unverified for numbers other than 2, 3 and 4) |
+| Display knob | Diagnostic enum sensor from the REST shadow (`hu_NModeSelectorKnob`); the bike's display rotates and acts as the knob: `display_off` (0), `locked` (1, display on), `ready` (2, walk assist works here with the throttle), `ride` (3). Other numbers show as `unknown_<n>`. Attribute `rest_raw` |
+| BMS state | Diagnostic enum sensor from the REST shadow (`bms_NState`): `standby` (2) or `active` (4, main battery connected). 5 (seen once, at power-off) and other numbers show as `unknown_<n>`. Attribute `rest_raw` |
+| Active faults | Count; attributes `fault_level_raw` (the raw level) and `fault_codes` (each active fault code mapped to the ISO time it was set; `{}` when none is active) |
 | GPS satellites | Diagnostic, merged |
 | Last location update | Diagnostic timestamp of the location fix, merged (push fix time, else the REST location time) |
-| Speed (raw) | Diagnostic, merged (push GPS velocity, else REST `pcm_vVehicleFilt`). Never observed while moving, so the unit is unknown: no unit, no device class |
-| Connected | Connectivity binary sensor; attribute `disconnect_reason` |
+| Speed | Speed in mph (verified against the bike's display on a ride), merged (push GPS velocity, else REST `pcm_vVehicleFilt`, which is a whole number and a few seconds behind). Home Assistant converts it for your unit system. A stopped bike's push fixes leave the velocity out; that is shown as 0 from the push connection |
+| Connected | Connectivity binary sensor; attributes `disconnect_reason` (the raw server text: `NONE` while connected, `MQTT_KEEP_ALIVE_TIMEOUT` in deep sleep, `CLIENT_INITIATED_DISCONNECT` after a restart) and `changed_at` (when the connection state last changed) |
 | Push connected | Diagnostic. Whether the live connection is up (the raw transport state; it can be on while no data arrives); attributes `last_push`, `last_status`, `failed_attempts`, `polling_only` |
 | Location | Device tracker (GPS), merged position (latitude and longitude always from one source). Attributes `source` and `altitude_raw` (passed on as reported, probably millimetres, an inference); the raw coordinates are not attributes. Home Assistant always adds a `gps_accuracy` of 0 for trackers; the API's accuracy value is deliberately not used because its unit has never been verified |
 
-Upgrading from 0.2.x: the "Charge state (shadow, raw)" sensor and the auto-discovered `pcm_vVehicleFilt` and `velocity_raw (stream)` sensors are removed (their values are part of Charge state and Speed (raw)) and deleted from the entity registry on setup. Entities the integration used to disable by default are enabled on setup; entities you disabled yourself stay disabled, and nothing is enabled while the entry's "Enable newly added entities" option is off.
+Upgrading from 0.3.x: five entities are replaced and their registry entries are deleted on setup (also when you had disabled them). Automations, dashboards and history that use them need the new entity:
+
+| Removed unique id | Replaced by |
+| --- | --- |
+| `<bike>_ride_mode_raw` | Ride mode (`<bike>_ride_mode`) |
+| `<bike>_power_state_raw` | Power state (`<bike>_power_state`) |
+| `<bike>_speed_raw` | Speed (`<bike>_speed`, now mph with a unit and no longer diagnostic) |
+| `<bike>_shadow_hu_NModeSelectorKnob` | Display knob (`<bike>_knob_position`) |
+| `<bike>_shadow_bms_NState` | BMS state (`<bike>_bms_state`) |
+
+The push connection's own `power_state_raw (stream)` and `ride_mode_raw (stream)` sensors are different values and are kept.
+
+Upgrading from 0.2.x: the "Charge state (shadow, raw)" sensor and the auto-discovered `pcm_vVehicleFilt` and `velocity_raw (stream)` sensors are removed (their values are part of Charge state and Speed) and deleted from the entity registry on setup. Entities the integration used to disable by default are enabled on setup; entities you disabled yourself stay disabled, and nothing is enabled while the entry's "Enable newly added entities" option is off.
 
 ### Raw and unverified values
 
-The state-of-charge values, the position, the odometer (miles) and the push charge states 1 (not charging), 2 (charging) and 3 (fully charged) have been checked against the real bike, as have the REST `con_NChargeState` numbers 0 (idle and unplugged), 2 (charging) and 3 (plugged in and charged). Everything else is passed through as reported. The meaning of the other push charge states (0 and 4 come from the public schema only), other REST charge-state numbers, the power, ride-mode and fault-level numbers is **not** known, so no labels are invented. Altitude is passed on raw (it looks like millimetres but is not verified). The units of "Time until fully charged" (minutes) and "Battery health" (percent) are assumed from the field names, not verified; a battery update without a time-to-full value leaves it unknown.
+The state-of-charge values, the position, the odometer (miles) and the push charge states 1 (not charging), 2 (charging) and 3 (fully charged) have been checked against the real bike, as have the REST `con_NChargeState` numbers 0 (idle and unplugged), 2 (charging) and 3 (plugged in and charged). A live session on 2026-11-02 matched more values: speed is mph on both sources; REST power state 3 (asleep), 2 (awake, main battery off) and 4 (main battery on); the display knob 0 to 3; BMS state 2 (standby) and 4 (active); ride modes 1 (Sport), 4 (All purpose) and 8 (All purpose manual). The other ride-mode names (2, 3, 5, 6, 7) are taken from the app and not verified, because the bike only offers Sport and All purpose today. Everything else is passed through as reported. The meaning of the other push charge states (0 and 4 come from the public schema only), other REST charge-state numbers, the other power-state numbers, BMS state 5, the fault level and the fault codes is **not** known, so no labels are invented (`unknown_<n>`, or the raw number). Altitude is passed on raw (it looks like millimetres but is not verified). The units of "Time until fully charged" (minutes) and "Battery health" (percent) are assumed from the field names, not verified; a battery update without a time-to-full value leaves it unknown.
 
 ### Auto-discovered sensors
 The API returns more fields than the app shows, and may add more over time. Any numeric or boolean value in the bike's status data that has no dedicated entity becomes a **diagnostic sensor** (enabled by default), named after the raw key (booleans show as 0/1). Nested objects, lists and text values are skipped, and position-like keys are never turned into sensors.
 
-The same applies to values that **only the push connection delivers** (predicted range, average power, assist level, gear, drive and ride mode, power state, OTA flag, ...): each numeric or boolean one becomes a diagnostic sensor named `<key> (stream)`, with its own unique-id namespace (`<bike>_push_<key>`). Their units have never been observed, so they are raw: no unit, no device class. Values that already have an entity (battery level, charge limit, odometer, time until full, health, charge state, satellites, speed, location) are not duplicated.
+The same applies to values that **only the push connection delivers** (predicted range, average power, assist level, gear, drive and ride mode, power state, OTA flag, ...): each numeric or boolean one becomes a diagnostic sensor named `<key> (stream)`, with its own unique-id namespace (`<bike>_push_<key>`). Their units have never been observed, so they are raw: no unit, no device class. Values that already have an entity (battery level, charge limit, odometer, time until full, health, charge state, satellites, speed, location) are not duplicated. The REST keys `bms_NState` and `hu_NModeSelectorKnob` have their own entities (BMS state, Display knob) since 0.4.0 and are no longer auto-discovered.
 
 ## Diagnostics and privacy
 
@@ -84,7 +99,7 @@ If the stream cannot be used (`grpcio` is missing, or it keeps failing) the inte
 
 - Push needs `grpcio` (installed through the `pyalso[push]` requirement). Without it the integration polls every polling interval.
 - **`pyalso` is installed from a GitHub release archive, not from PyPI.** Home Assistant cannot version-check a requirement that is a URL, so it runs a pip install on every start and every reload of the integration, and the integration cannot load while GitHub is unreachable (for example when Home Assistant boots offline; this includes the restart right after installing from HACS). Publishing `pyalso` to PyPI and pinning `pyalso[push]==<version>` is the planned fix; until then this is a known cost.
-- Overnight behaviour (token expiry on a stream that stays open for hours) and ride-time data have not been observed yet; see `docs/STATUS.md`.
+- Overnight behaviour (token expiry on a stream that stays open for hours) has not been observed yet; see `docs/STATUS.md`. During a ride the push connection sent only location updates (no ride, energy or lock data).
 - Read only: no remote commands.
 - Google and Apple sign-in are not supported.
 

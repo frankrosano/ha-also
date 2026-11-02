@@ -8,7 +8,7 @@
   "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/frankrosano/ha-also/issues",
   "requirements": [
-    "pyalso[push]@https://github.com/frankrosano/pyalso/archive/refs/tags/v0.3.0.zip"
+    "pyalso[push]@https://github.com/frankrosano/pyalso/archive/refs/tags/v0.4.0.zip"
   ],
-  "version": "0.3.0"
+  "version": "0.4.0"
 }

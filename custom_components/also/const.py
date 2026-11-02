@@ -64,6 +64,8 @@ SHADOW_KEY_LATITUDE = "con_aLatitude"
 SHADOW_KEY_LONGITUDE = "con_aLongitude"
 SHADOW_KEY_ALTITUDE = "con_zAltitude"
 SHADOW_KEY_SPEED = "pcm_vVehicleFilt"
+SHADOW_KEY_BMS_STATE = "bms_NState"
+SHADOW_KEY_KNOB = "hu_NModeSelectorKnob"
 
 EXPLICIT_SHADOW_KEYS: frozenset[str] = frozenset(
     {
@@ -81,6 +83,8 @@ EXPLICIT_SHADOW_KEYS: frozenset[str] = frozenset(
         SHADOW_KEY_LONGITUDE,
         SHADOW_KEY_ALTITUDE,
         SHADOW_KEY_SPEED,
+        SHADOW_KEY_BMS_STATE,
+        SHADOW_KEY_KNOB,
     }
 )
 
@@ -108,13 +112,21 @@ EXPLICIT_PUSH_KEYS: frozenset[str] = frozenset(
     }
 )
 
-# Sensor keys (the unique id without its ``<vehicle_id>_`` prefix) of entities that 0.3.0 removed
-# because their value is now part of a merged entity. Their registry entries are deleted on setup.
+# Sensor keys (the unique id without its ``<vehicle_id>_`` prefix) of entities that 0.3.0 and
+# 0.4.0 removed or replaced: 0.3.0 merged values into one entity, 0.4.0 replaced raw numbers with
+# named states. Their registry entries are deleted on setup.
 REMOVED_ENTITY_KEYS: frozenset[str] = frozenset(
     {
+        # 0.3.0
         "charge_state_raw",  # REST con_NChargeState: now the rest_raw attribute of charge_state
-        f"{SHADOW_UNIQUE_ID_INFIX}{SHADOW_KEY_SPEED}",  # merged into speed_raw
-        f"{PUSH_UNIQUE_ID_INFIX}velocity_raw",  # merged into speed_raw
+        f"{SHADOW_UNIQUE_ID_INFIX}{SHADOW_KEY_SPEED}",  # merged into speed (was speed_raw)
+        f"{PUSH_UNIQUE_ID_INFIX}velocity_raw",  # merged into speed (was speed_raw)
+        # 0.4.0
+        "ride_mode_raw",  # replaced by ride_mode
+        "power_state_raw",  # replaced by power_state
+        "speed_raw",  # replaced by speed (mph)
+        f"{SHADOW_UNIQUE_ID_INFIX}{SHADOW_KEY_KNOB}",  # replaced by knob_position
+        f"{SHADOW_UNIQUE_ID_INFIX}{SHADOW_KEY_BMS_STATE}",  # replaced by bms_state
     }
 )
 

@@ -1,4 +1,41 @@
 # Changelog
+## 0.4.0
+Named states for the bike's ride mode, power state, display knob and BMS state, speed in mph, and
+the active fault codes, from a live session on the bike (2026-11-02). Needs pyalso 0.4.0 (the
+manifest requires the pyalso v0.4.0 release archive).
+
+**Breaking:**
+* Replaced entities, deleted from the entity registry on setup (also when you had disabled them).
+  Automations, scripts, dashboards and history that use them break:
+  * `<bike>_ride_mode_raw` -> `<bike>_ride_mode` (Ride mode, enum).
+  * `<bike>_power_state_raw` -> `<bike>_power_state` (Power state, enum, diagnostic).
+  * `<bike>_speed_raw` -> `<bike>_speed` (Speed): now mph with device class speed, converted by
+    Home Assistant for your unit system, and no longer diagnostic.
+  * `<bike>_shadow_hu_NModeSelectorKnob` (auto-discovered) -> `<bike>_knob_position` (Display
+    knob, enum, diagnostic). `hu_NModeSelectorKnob` is no longer auto-discovered.
+  * `<bike>_shadow_bms_NState` (auto-discovered) -> `<bike>_bms_state` (BMS state, enum,
+    diagnostic). `bms_NState` is no longer auto-discovered.
+  The stream's own `<bike>_push_power_state_raw` and `<bike>_push_ride_mode_raw` sensors are
+  different values and are kept.
+
+Added:
+* Ride mode: `sport`, `sport_manual`, `trail_manual`, `all_purpose`, `conserve`, `trail_cadence`,
+  `custom`, `all_purpose_manual` (the app's names; Sport and All purpose are confirmed on the bike,
+  All purpose manual was observed, the others are not offered by the bike yet). 0 (none selected)
+  and other numbers are `unknown_<n>`. Attribute `rest_raw`.
+* Power state: `asleep`, `awake_battery_off` and `battery_on` (the verified numbers 3, 2 and 4);
+  other numbers are `unknown_<n>`. Attributes `rest_raw` and `candidate_name` (the app's name).
+* Display knob: `display_off`, `locked`, `ready`, `ride`; BMS state: `standby`, `active`. Other
+  numbers are `unknown_<n>`. Attribute `rest_raw`.
+* Every enum sensor lists an `unknown_<n>` value in its options only while it is the state (the
+  charge-state behaviour, now shared).
+* Active faults: attribute `fault_codes`, each active fault code mapped to the ISO time it was set.
+* Connected: attribute `changed_at`, when the connection state last changed. `disconnect_reason`
+  stays the raw server text.
+* Speed comes from the stream as 0.0 when a stopped bike's location update leaves the velocity
+  out, instead of keeping the last pushed speed or falling back to REST.
+* Tests for the speed sensor's stream path (0.3.0 review finding HA-2).
+
 ## 0.3.0
 One entity per value: a value that both the push stream and REST report is merged, with the stream
 preferred while it is connected and has delivered the value, and REST as the fallback. Needs pyalso

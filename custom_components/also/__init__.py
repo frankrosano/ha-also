@@ -93,7 +93,7 @@ def _migrate_odometer(entry: er.RegistryEntry) -> dict[str, str] | None:
 
 
 def _is_removed_entity(reg: er.RegistryEntry) -> bool:
-    """True for a sensor of this integration that 0.3.0 removed (see ``REMOVED_ENTITY_KEYS``).
+    """True for a sensor that 0.3.0 or 0.4.0 removed or replaced (see ``REMOVED_ENTITY_KEYS``).
 
     Unique ids are ``<vehicle_id>_<key>`` and vehicle ids contain no underscore, so the key is
     everything after the FIRST underscore and must match exactly.
@@ -108,8 +108,11 @@ def _is_removed_entity(reg: er.RegistryEntry) -> bool:
 def _async_clean_up_registry(hass: HomeAssistant, entry: AlsoConfigEntry) -> None:
     """Delete the registry entries of removed entities and re-enable integration-disabled ones.
 
+    The removed entities (0.3.0 merged values, 0.4.0 raw numbers replaced by named states) are
+    orphans whatever their ``disabled_by``, so they are deleted even when the user disabled them.
+
     Before 0.3.0 some entities were disabled by default (``disabled_by=INTEGRATION``); every entity
-    is enabled by default now, so those are re-enabled. Entities disabled by the USER (or by a
+    is enabled by default now, so those are re-enabled. Other entities disabled by the USER (or by a
     device, config entry or Home Assistant itself) are never touched, and nothing is re-enabled
     while the entry's "enable newly added entities" system option is off (Home Assistant marks new
     entities INTEGRATION-disabled then).

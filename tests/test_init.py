@@ -228,7 +228,17 @@ async def test_unload(hass: HomeAssistant, init_integration: MockConfigEntry) ->
     assert init_integration.state is ConfigEntryState.NOT_LOADED
 
 
-# ------------------------------------------------------- registry cleanup on setup (0.3.0)
+# ------------------------------------------------ registry cleanup on setup (0.3.0, 0.4.0)
+REMOVED_0_3_0 = ("charge_state_raw", "shadow_pcm_vVehicleFilt", "push_velocity_raw")
+REPLACED_0_4_0 = (
+    "ride_mode_raw",
+    "power_state_raw",
+    "speed_raw",
+    "shadow_hu_NModeSelectorKnob",
+    "shadow_bms_NState",
+)
+
+
 def _pre_create(
     registry: er.EntityRegistry,
     entry: MockConfigEntry,
@@ -251,16 +261,26 @@ async def test_setup_removes_exactly_the_merged_away_entities(
     other = make_entry(unique_id="someone-else", disabled_by=ConfigEntryDisabler.USER)
     other.add_to_hass(hass)
     registry = er.async_get(hass)
+    user = er.RegistryEntryDisabler.USER
+    # Replaced entities are orphans: removed even when the user disabled them.
     removed = [
-        _pre_create(registry, entry, key)
-        for key in ("charge_state_raw", "shadow_pcm_vVehicleFilt", "push_velocity_raw")
+        _pre_create(registry, entry, key, disabled_by=user if key == "power_state_raw" else None)
+        for key in (*REMOVED_0_3_0, *REPLACED_0_4_0)
     ]
     kept = [
         _pre_create(registry, entry, "shadow_pcm_vVehicleFiltX"),
         _pre_create(registry, entry, "push_battery_charging_state_raw"),
         _pre_create(registry, entry, "charge_state"),
         _pre_create(registry, entry, "charge_state_raw", domain="binary_sensor"),
+        # The stream's own (different) enums keep their discovered entities.
+        _pre_create(registry, entry, "push_power_state_raw"),
+        _pre_create(registry, entry, "push_ride_mode_raw"),
+        _pre_create(registry, entry, "shadow_hu_NModeSelectorKnobX"),
+        _pre_create(registry, entry, "ride_mode"),
+        _pre_create(registry, entry, "speed"),
+        _pre_create(registry, entry, "power_state_raw", domain="binary_sensor"),
     ]
+    user_disabled = _pre_create(registry, entry, "shadow_bms_xNewThing", disabled_by=user)
     foreign = registry.async_get_or_create(
         "sensor", DOMAIN, f"{VEHICLE_ID_2}_charge_state_raw", config_entry=other
     ).entity_id
@@ -270,14 +290,17 @@ async def test_setup_removes_exactly_the_merged_away_entities(
     for entity_id in removed:
         assert registry.async_get(entity_id) is None, entity_id
         assert hass.states.get(entity_id) is None, entity_id
-    for entity_id in [*kept, foreign]:
+    for entity_id in [*kept, foreign, user_disabled]:
         assert registry.async_get(entity_id) is not None, entity_id
+    assert registry.async_get(user_disabled).disabled_by is user  # untouched
     # Not re-created by the platform's restore loop for discovered sensors, nor by a later poll.
     await get_coordinator(entry).async_refresh()
     await hass.async_block_till_done()
-    for key in ("charge_state_raw", "shadow_pcm_vVehicleFilt", "push_velocity_raw"):
+    for key in (*REMOVED_0_3_0, *REPLACED_0_4_0):
         assert registry.async_get_entity_id("sensor", DOMAIN, f"{VEHICLE_ID}_{key}") is None, key
-    assert registry.async_get_entity_id("sensor", DOMAIN, f"{VEHICLE_ID}_speed_raw")
+    for key in ("speed", "ride_mode", "power_state", "knob_position", "bms_state"):
+        assert registry.async_get_entity_id("sensor", DOMAIN, f"{VEHICLE_ID}_{key}"), key
+    assert registry.async_get(user_disabled).disabled_by is user
     await hass.config_entries.async_unload(entry.entry_id)
 
 
@@ -293,11 +316,11 @@ async def test_setup_re_enables_integration_disabled_entities_only(
         _pre_create(
             registry, entry, "push_connected", domain="binary_sensor", disabled_by=integration
         ),
-        _pre_create(registry, entry, "shadow_bms_NState", disabled_by=integration),
+        _pre_create(registry, entry, "shadow_bms_xNewThing", disabled_by=integration),
         _pre_create(registry, entry, "push_bms_state_raw", disabled_by=integration),
     ]
     by_user = _pre_create(
-        registry, entry, "shadow_hu_NModeSelectorKnob", disabled_by=er.RegistryEntryDisabler.USER
+        registry, entry, "shadow_foo_bTest", disabled_by=er.RegistryEntryDisabler.USER
     )
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()

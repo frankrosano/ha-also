@@ -454,6 +454,48 @@ async def test_odometer_unit_us_customary(hass: HomeAssistant, mock_pyalso: Pyal
     await hass.config_entries.async_unload(entry.entry_id)
 
 
+async def test_speed_unit_us_customary(hass: HomeAssistant, mock_pyalso: PyalsoMocks) -> None:
+    hass.config.units = US_CUSTOMARY_SYSTEM
+    entry = make_entry()
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    stream = mock_pyalso.streams.latest()
+    stream.status(True)
+    stream.emit(location_event())
+    await hass.async_block_till_done()
+    state = _state(hass, "sensor", "speed")
+    assert state.attributes["unit_of_measurement"] == "mph"
+    assert float(state.state) == 3.5
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_speed_is_mph_stream_first_with_rest_fallback(
+    hass: HomeAssistant, init_integration: MockConfigEntry, mock_pyalso: PyalsoMocks
+) -> None:
+    """The stream path of the speed sensor (missing in 0.3.0, review finding HA-2)."""
+    stream = mock_pyalso.streams.latest()
+    stream.status(True)
+    stream.emit(location_event())  # 3.5 mph
+    await hass.async_block_till_done()
+    state = _state(hass, "sensor", "speed")
+    assert float(state.state) == pytest.approx(3.5 * KM_PER_MILE, rel=1e-4)  # metric test config
+    assert state.attributes["unit_of_measurement"] == "km/h"
+    assert state.attributes["device_class"] == "speed"
+    attrs = state.attributes
+    assert (attrs["source"], attrs["stream_raw"], attrs["rest_raw"]) == ("stream", 3.5, 0)
+    # Stopped: the fix arrives without a velocity, which is 0.0 from the stream (not unknown).
+    stream.emit(location_event(velocity=None, at=BASE_TIME + 200))
+    await hass.async_block_till_done()
+    state = _state(hass, "sensor", "speed")
+    assert float(state.state) == 0.0
+    assert (state.attributes["source"], state.attributes["stream_raw"]) == ("stream", 0.0)
+    stream.status(False, "stream_ended")
+    await hass.async_block_till_done()
+    state = _state(hass, "sensor", "speed")
+    assert state.attributes["source"] == "rest" and float(state.state) == 0.0
+
+
 async def test_old_odometer_unique_id_is_migrated(
     hass: HomeAssistant, mock_pyalso: PyalsoMocks
 ) -> None:
